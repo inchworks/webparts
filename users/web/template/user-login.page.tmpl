@@ -1,0 +1,33 @@
+{{template "layout" .}}
+
+{{define "title"}}Login{{end}}
+
+{{define "pagemeta"}}
+	<meta name="description" content="Login to this website.">
+    <meta name="robots" content="noindex">
+{{end}}
+
+{{define "page"}}
+    <div class="container">
+        <p>Login to {{block "website" .}}this website{{end}}.</p>
+        <form action='/user/login' method='POST' novalidate>
+ 
+            {{with .Users}}
+                <input type='hidden' name='csrf_token' value='{{.CSRFToken}}'>
+                {{with .Errors.Get "generic"}}
+                    <div class='alert alert-danger'>{{.}}</div>
+                {{end}}
+                <div class="form-group col-md-6">
+                    <label for='usr'>Username</label>
+                    <input type='email' class="form-control" id='usr' name='username' autocomplete='username' value='{{.Get "username"}}'>
+                    <small class="form-text text-muted">Your email address.</small>
+                </div>
+                <div class="form-group col-md-6">
+                    <label for='pwd'>Password</label>
+                    <input type='password' class="form-control" id='pwd' name='password' autocomplete='current-password'>
+                </div>
+             {{end}}
+            <button type='submit' class='btn btn-primary'>Login</button>
+        </form>
+    </div>
+{{end}}

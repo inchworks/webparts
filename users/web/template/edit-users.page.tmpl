@@ -1,0 +1,92 @@
+{{template "layout" .}}
+
+{{define "title"}}Edit Users{{end}}
+
+{{define "pagemeta"}}
+    <meta name="robots" content="noindex">
+{{end}}
+
+{{define "page"}}
+	<div class="container">
+
+		<h3>Users</h3>
+
+		<form action='/edit-users' method='POST'>
+ 			{{with .Users}}
+            	<input type='hidden' name='csrf_token' value='{{.CSRFToken}}'>
+				{{ $roleOpts := .RoleOpts }}
+				{{ $statusOpts := .StatusOpts }}
+
+				<div id="formChildren">
+					{{range .Children}}
+						<div class='childForm' {{ .ChildStyle }}>
+							<div style='display:none'>
+								<input type='number' name='index' value='{{ .ChildIndex }}'>								
+							</div>
+							<div class="form-group row">
+								<label class="sr-only">Name</label>
+								<div class="col-md-3">
+									<input type='text' class='form-control {{.ChildValid "displayName"}}' placeholder='Display name' name='displayName' value='{{ .DisplayName }}'>
+									<div class='invalid-feedback'>{{.ChildError "displayName"}}</div>
+								</div>
+								<label class="sr-only">Username</label>
+								<div class="col-md-3">
+									<input type='text' class='form-control {{.ChildValid "username"}}' placeholder='User name' name='username' value='{{ .Username }}'>
+									<div class='invalid-feedback'>{{ .ChildError "username"}}</div>
+								</div>
+								<div class="col-md-2">
+									<label class="sr-only">Role</label>
+									<select class='custom-select {{.ChildValid "role"}}' name='role'>
+										{{ $role := .Role }}
+										{{ range $i, $opt := $roleOpts }}
+											<option value='{{ $i }}' {{ if eq $i $role }} selected{{ end }}>{{ $opt }}</option>
+										{{end}}
+									</select>
+									<div class='invalid-feedback'>{{.ChildError "role"}}</div>
+								</div>
+								<div class="col-md-2">
+									<label class="sr-only">Status</label>
+									<select class='custom-select {{.ChildValid "status"}}' name='status'>
+										{{ $status := .Status }}
+										{{ range $i, $opt := $statusOpts }}
+											<option value='{{ $i }}' {{ if eq $i $status }} selected{{ end }}>{{ $opt }}</option>
+										{{end}}
+									</select>
+									<div class='invalid-feedback'>{{.ChildError "status"}}</div>
+								</div>
+								<div class="col-md-2">
+									<a href="#" class="btn btn-secondary btnConfirmDelChild">Delete</a>
+								</div>
+							</div>
+						</div>
+					{{end}}
+				</div>
+
+				<div class="form-group row">
+					<div class="offset-md-8 col-md-2">
+						<a href="#" class="btn btn-secondary btnAddChild">New User</a>
+					</div>
+				</div>
+				<div class="form-group row">
+					<div class="col-md-2">
+						<input type='submit' class="btn btn-primary" value='Save Users' id='submit'>
+					</div>
+				</div>
+			{{end}}
+		</form>
+	</div>	
+{{end}}
+
+{{ define "pagescripts" }}
+   <script type="text/javascript" src='/static/js/multiforms-01.js'></script>
+   <script>
+		// page-specific item data
+		function childAdded($prototype, $newForm) {}
+		function pageReady() {}
+
+		function confirmAsk($child) {
+			return 'Remove access and delete data for ' + $child.find('input[name="displayName"]').val() + '?';
+		}
+    </script>
+
+{{end}}
