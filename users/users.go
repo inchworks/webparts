@@ -22,9 +22,6 @@ type App interface {
 	// GetRedirect returns the next page after log-in, probably from a session key
 	GetRedirect(r *http.Request) string
 
-	// IsAdmin returns true if the user is an administrator, probaby from a session key
-	IsAdmin(r *http.Request) bool
-
 	// Log optionally records an error
 	Log(error)
 

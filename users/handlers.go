@@ -114,12 +114,6 @@ func (u *Users) GetFormEdit(w http.ResponseWriter, r *http.Request) {
 
 	app := u.App
 
-	// allow access?
-	if !app.IsAdmin(r) {
-		u.clientError(w, http.StatusUnauthorized)
-		return
-	}
-
 	// form to edit users, and
 	f := u.forEditUsers(app.Token(r))
 
@@ -131,12 +125,6 @@ func (u *Users) GetFormEdit(w http.ResponseWriter, r *http.Request) {
 func (u *Users) PostFormEdit(w http.ResponseWriter, r *http.Request) {
 
 	app := u.App
-
-	// allow access?
-	if !app.IsAdmin(r) {
-		u.clientError(w, http.StatusUnauthorized)
-		return
-	}
 
 	err := r.ParseForm()
 	if err != nil {

@@ -1,0 +1,29 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, build with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Mac and VSCode stuff
+.DS_Store
+__debug_bin
+*.code-workspace
+.vscode/
+
+# Working folders
+/mysql/
+/mysql-0/
+images/
+
+# Tests and backups
+MacOS Scripts/
+Test/
+*.sql
+*.tar
