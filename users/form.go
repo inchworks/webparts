@@ -70,12 +70,12 @@ func (f *UsersForm) GetUsers(nRoleOpts int) (items []*UserFormData, err error) {
 			return nil, err
 		}
 
-		role, err := f.ChildSelect("role", i, nRoleOpts)
+		role, err := f.ChildSelect("role", i, ix, nRoleOpts)
 		if err != nil {
 			return nil, err
 		}
 
-		status, err := f.ChildSelect("status", i, len(statusOpts))
+		status, err := f.ChildSelect("status", i, ix, len(statusOpts))
 		if err != nil {
 			return nil, err
 		}
