@@ -97,11 +97,6 @@ func (f *Form) NChildItems() int {
 // ChildBool returns a boolean value from child form.
 func (f *Form) ChildBool(field string, i int) bool {
 
-	// ignore template
-	if i == 0 {
-		return false
-	}
-
 	// any value at all means checked
 	value := f.Values[field][i]
 	return value != ""
@@ -113,7 +108,7 @@ func (f *Form) ChildFile(field string, i int, ix int, validType func(string) boo
 	// ## Could be a general-purpose validation, given an error string.
 
 	// don't validate template
-	if i == 0 {
+	if ix == -1 {
 		return ""
 	}
 
@@ -129,7 +124,7 @@ func (f *Form) ChildFile(field string, i int, ix int, validType func(string) boo
 func (f *Form) ChildMin(field string, i int, ix int, min int) int {
 
 	// don't validate template
-	if i == 0 {
+	if ix == -1 {
 		return 0
 	}
 
@@ -149,7 +144,7 @@ func (f *Form) ChildMin(field string, i int, ix int, min int) int {
 func (f *Form) ChildPositive(field string, i int, ix int) int {
 
 	// don't validate template
-	if i == 0 {
+	if ix == -1 {
 		return 0
 	}
 
@@ -169,7 +164,7 @@ func (f *Form) ChildPositive(field string, i int, ix int) int {
 func (f *Form) ChildRequired(field string, i int, ix int) string {
 
 	// don't validate template
-	if i == 0 {
+	if ix == -1 {
 		return ""
 	}
 
@@ -182,10 +177,10 @@ func (f *Form) ChildRequired(field string, i int, ix int) string {
 
 // ChildSelect returns of the value of an HTML select.
 // It assumes values are integers, 0 ... nOption-1
-func (f *Form) ChildSelect(field string, i int, nOptions int) (int, error) {
+func (f *Form) ChildSelect(field string, i int, ix int, nOptions int) (int, error) {
 
 	// don't validate template
-	if i == 0 {
+	if ix == -1 {
 		return 0, nil
 	}
 
