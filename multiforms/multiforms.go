@@ -94,12 +94,25 @@ func (f *Form) NChildItems() int {
 	return len(f.Values["index"])
 }
 
-// ChildBool returns a boolean value from child form.
-func (f *Form) ChildBool(field string, i int) bool {
+// ChildBool returns a checkbox value from child form.
+// Unlike other fields, only checked fields are returned, and the value is the child index.
+func (f *Form) ChildBool(field string, ix int) bool {
 
-	// any value at all means checked
-	value := f.Values[field][i]
-	return value != ""
+	// ignore template
+	if ix == -1 {
+		return false
+	}
+
+	// ## Better to convert the returned checkbox values to ints just once.
+	ixStr := strconv.Itoa((ix))
+
+	// a value returned means checked
+	for _, v := range f.Values[field] {
+		if v == ixStr {
+			return true
+		}
+	}
+	return false
 }
 
 // ChildFile returns a file name from child form.
@@ -326,7 +339,6 @@ func pArseFormCollection(r *http.Request, typeName string) []map[string]string {
 	return result
 }
 
-
 // parseFormHandler processes field names like "type.field".
 func parseFormHandler(writer http.ResponseWriter, request *http.Request) {
 
@@ -336,7 +348,7 @@ func parseFormHandler(writer http.ResponseWriter, request *http.Request) {
 
 	userParams := make(map[string]string)
 
-	for key, _ := range request.Form {
+	for key := range request.Form {
 		if strings.HasPrefix(key, "contact.") {
 			userParams[string(key[8:])] = request.Form.Get(key)
 		}
