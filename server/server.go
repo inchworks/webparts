@@ -57,7 +57,6 @@ func (srv *Server) Serve(app App) {
 
 		// HTTPS server, with certificate from manager
 		srv1 := newServer(srv.AddrHTTPS, app.Routes(), srv.ThreatLog, true)
-		srv1.Handler = app.Routes()
 		srv1.TLSConfig = &tls.Config{
 			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 				// GoogleBot wants to connect without SNI. Use default name.

@@ -17,11 +17,6 @@ __debug_bin
 *.code-workspace
 .vscode/
 
-# Working folders
-/mysql/
-/mysql-0/
-images/
-
 # Tests and backups
 MacOS Scripts/
 Test/
