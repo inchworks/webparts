@@ -87,11 +87,11 @@ type Users struct {
 	Store UserStore
 }
 
-// TemplatesPath returns a path to the package's template files, if accessible.
+// WebPath returns a path to the package's template files, if accessible.
 //
 // They will not be available if running without source code. In this case the parent
 // must use a copy made during the application build.
-func TemplatesPath() (string, error) {
+func WebPath() (string, error) {
 
 	// get the file for this function
 	_, filename, _, ok := runtime.Caller(0)
@@ -100,7 +100,7 @@ func TemplatesPath() (string, error) {
 	}
 
 	// templates folder, relative to this file
-	tp := filepath.Join(filepath.Dir(filename), "web/template")
+	tp := filepath.Join(filepath.Dir(filename), "web")
 
 	// check if folder exists
 	_, err := os.Stat(tp)
