@@ -26,7 +26,6 @@ type Server struct {
 	// logging
 	ErrorLog  *log.Logger
 	InfoLog   *log.Logger
-	ThreatLog *log.Logger
 
 	// HTTPS
 	CertEmail string   // notifications from Let's Encrypt
@@ -56,7 +55,7 @@ func (srv *Server) Serve(app App) {
 		srv.InfoLog.Printf("Starting server %s", srv.AddrHTTPS)
 
 		// HTTPS server, with certificate from manager
-		srv1 := newServer(srv.AddrHTTPS, app.Routes(), srv.ThreatLog, true)
+		srv1 := newServer(srv.AddrHTTPS, app.Routes(), srv.ErrorLog, true)
 		srv1.TLSConfig = &tls.Config{
 			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 				// GoogleBot wants to connect without SNI. Use default name.
@@ -81,7 +80,7 @@ func (srv *Server) Serve(app App) {
 		}
 
 		// HTTP server : accept http-01 challenges, and redirect HTTP -> HTTPS
-		srv2 := newServer(srv.AddrHTTP, m.HTTPHandler(http.HandlerFunc(handleHTTPRedirect)), srv.ThreatLog, false)
+		srv2 := newServer(srv.AddrHTTP, m.HTTPHandler(http.HandlerFunc(handleHTTPRedirect)), srv.ErrorLog, false)
 		go srv2.ListenAndServe()
 
 		// HTTPS server

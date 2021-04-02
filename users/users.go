@@ -76,7 +76,6 @@ type UserStore interface {
 	Name(id int64) string                           // get display name for user by database ID
 	Rollback()                                      // request update rollback
 	Update(s *User) error                           // add or update user
-	// ## Contributors !!
 }
 
 // Users holds the dependencies of this package on the parent application.
@@ -87,7 +86,7 @@ type Users struct {
 	Store UserStore
 }
 
-// WebPath returns a path to the package's template files, if accessible.
+// WebPath returns a path to the package's web resources, including template files, if accessible.
 //
 // They will not be available if running without source code. In this case the parent
 // must use a copy made during the application build.
