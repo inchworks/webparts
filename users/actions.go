@@ -1,3 +1,5 @@
+// Copyright © Rob Burke inchworks.com, 2020.
+
 package users
 
 // Processing for user data in a web server application.

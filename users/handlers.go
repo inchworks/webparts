@@ -1,3 +1,5 @@
+// Copyright © Rob Burke inchworks.com, 2020.
+
 package users
 
 // Form handling for user sign-up, login and management

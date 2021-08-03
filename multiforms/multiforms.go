@@ -23,15 +23,13 @@ package multiforms
 // o ## Should some of the child processing be pushed down into formSlides.go?
 
 import (
+	"embed"
 	"errors"
-	"path/filepath"
 	"fmt"
 	"html/template"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -54,6 +52,10 @@ type Child struct {
 	Parent     *Form
 	ChildIndex int
 }
+
+// WebFiles are the package's web resources (templates and static files)
+//go:embed web
+var WebFiles embed.FS
 
 // New returns an initialised Form structure.
 func New(data url.Values, token string) *Form {
@@ -394,23 +396,6 @@ func (c *Child) ChildValid(field string) string {
 // must use a copy made during the application build.
 func WebPath() (string, error) {
 
-	// get the file for this function
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		return "", nil // don't know why, but not worth worrying
-	}
-
-	// templates folder, relative to this file
-	tp := filepath.Join(filepath.Dir(filename), "web")
-
-	// check if folder exists
-	_, err := os.Stat(tp)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return "", err // don't know!
-		} else {
-			return "", nil // no folder
-		}
-	}
-	return tp, nil // folder exists
+	// ## not needed with embedded file, left until quiz app changed
+	return "", nil
 }

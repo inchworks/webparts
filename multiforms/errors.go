@@ -1,3 +1,5 @@
+// Copyright © Rob Burke inchworks.com, 2020.
+
 package multiforms
 
 // Validation error messages for forms, keyed by name of the form field.
