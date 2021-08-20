@@ -3,14 +3,13 @@
 package users
 
 // Processing for user data in a web server application.
-//
-// #### These functions may modify application state.
-// #### Which functions need to be exported?
 
 import (
 	"errors"
 	"net/url"
 	"time"
+
+	"github.com/inchworks/webparts/etx"
 )
 
 // UserDisplayName returns the display name for a user.
@@ -74,11 +73,14 @@ func (u *Users) forEditUsers(token string) *UsersForm {
 	return f
 }
 
-// onEditUsers processes returned form data. Returns true if there are errors (client or server).
+// onEditUsers processes returned form data. Returns an extended transaction ID if there are no errors (client or server).
 // ## Why not take the whole form?
-func (ua *Users) onEditUsers(usSrc []*UserFormData) bool {
+func (ua *Users) onEditUsers(usSrc []*UserFormData) etx.TxId {
 
 	app := ua.App
+
+	// start extended transaction, for app to use as needed
+	tx := ua.TM.Begin()
 
 	// serialisation
 	defer app.Serialise(true)()
@@ -96,7 +98,7 @@ func (ua *Users) onEditUsers(usSrc []*UserFormData) bool {
 
 		if iSrc == nSrc {
 			// no more source users - delete from destination
-			ua.App.OnRemoveUser(usDest[iDest])
+			ua.App.OnRemoveUser(tx, usDest[iDest])
 			ua.Store.DeleteId(usDest[iDest].Id)
 			iDest++
 
@@ -116,7 +118,7 @@ func (ua *Users) onEditUsers(usSrc []*UserFormData) bool {
 			ix := usSrc[iSrc].ChildIndex
 			if ix > iDest {
 				// source user removed - delete from destination
-				ua.App.OnRemoveUser(usDest[iDest])
+				ua.App.OnRemoveUser(tx, usDest[iDest])
 				ua.Store.DeleteId(usDest[iDest].Id)
 				iDest++
 
@@ -134,7 +136,7 @@ func (ua *Users) onEditUsers(usSrc []*UserFormData) bool {
 					uDest.Role = uSrc.Role
 					uDest.Status = uSrc.Status
 					if err := ua.Store.Update(uDest); err != nil {
-						return false // unexpected database error
+						return 0 // unexpected database error
 					}
 				}
 				iSrc++
@@ -142,12 +144,12 @@ func (ua *Users) onEditUsers(usSrc []*UserFormData) bool {
 
 			} else {
 				// out of sequence team index
-				return false
+				return 0
 			}
 		}
 	}
 
-	return true
+	return tx
 }
 
 // onUserSignup processes a sigup request.

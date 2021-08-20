@@ -7,6 +7,8 @@ import (
 	"embed"
 	"net/http"
 	"time"
+
+	"github.com/inchworks/webparts/etx"
 )
 
 // App is the interface to functions provided by the parent application.
@@ -29,7 +31,7 @@ type App interface {
 	// OnAddUser is called to add any additional application data for a iser
 
 	// OnRemoveUser is called to delete any application data for a user
-	OnRemoveUser(user *User)
+	OnRemoveUser(tx etx.TxId, user *User)
 
 	// Render writes an HTTP response using the specified template and template field Users
 	Render(w http.ResponseWriter, r *http.Request, template string, usersData interface{})
@@ -82,6 +84,7 @@ type Users struct {
 	App   App
 	Roles []string
 	Store UserStore
+	TM    *etx.TM
 }
 
 // WebFiles are the package's web resources (templates and static files)

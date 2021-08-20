@@ -150,7 +150,8 @@ func (u *Users) PostFormEdit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// save changes
-	if u.onEditUsers(users) {
+	if tx := u.onEditUsers(users); tx != 0 {
+		u.TM.DoNext(tx)
 		app.Flash(r, "User changes saved.")
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 
