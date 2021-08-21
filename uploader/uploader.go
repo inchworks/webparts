@@ -14,7 +14,7 @@
 // uploader maintains consistency between the parent object and the media files it references, with these limitations:
 //
 // - Object saved before EndSave is completed : there is a brief period when new media files cannot be displayed.
-// ## Can I check.
+// ## Can I check?
 //
 // - After object saved, and before the bind operation, there is a brief period where it references new files and has deleted files removed,
 //  but still references the previous versions of updated files.
@@ -145,7 +145,7 @@ var WebFiles embed.FS
 
 // Implement RM interface for webparts.etx.
 func (up *Uploader) Name() string {
-	return "webparts.tx"
+	return "webparts.uploader"
 }
 
 func (up *Uploader) ForOperation(opType int) etx.Op {
@@ -330,7 +330,7 @@ func FileFromName(id etx.TxId, name string) string {
 }
 
 // MediaType returns the media type (0 if not accepted)
-func (im *Uploader) MediaType(name string) int {
+func (up *Uploader) MediaType(name string) int {
 
 	_, err := imaging.FormatFromFilename(name)
 	if err == nil {
@@ -338,7 +338,7 @@ func (im *Uploader) MediaType(name string) int {
 	} else {
 		// check for acceptable video types
 		t := filepath.Ext(name)
-		for _, vt := range im.VideoTypes {
+		for _, vt := range up.VideoTypes {
 			if t == vt {
 				return MediaVideo
 			}
@@ -348,10 +348,11 @@ func (im *Uploader) MediaType(name string) int {
 }
 
 // ValidCode returns false if the transaction code for a set of uploads has expired.
-func (im *Uploader) ValidCode(tx etx.TxId) bool {
+func (up *Uploader) ValidCode(tx etx.TxId) bool {
 
 	// cutoff time for orphans, less 20%
-	cutoff := time.Now().Add((-4 * im.MaxAge) / 5)
+	max := (up.MaxAge * 4) / 5
+	cutoff := time.Now().Add(-1 * max)
 
 	// transaction ID is also a timestamp
 	return etx.Timestamp(tx).After(cutoff)
@@ -807,7 +808,7 @@ func (up *Uploader) worker(
 			cutoff := time.Now().Add(-1 * up.MaxAge)
 
 			// request timeout for extended transactions started before the cutoff time
-			if err := up.tm.Timeout(up, cutoff); err != nil {
+			if err := up.tm.Timeout(up, 0, cutoff); err != nil {
 				up.errorLog.Print(err.Error())
 			}
 

@@ -191,19 +191,22 @@ func Timestamp(id TxId) time.Time {
 }
 
 // Timeout executes any old operations for a resource manager.
-func (tm *TM) Timeout(rm RM, before time.Time) error {
+// A non-zero opType selects the specified type.
+func (tm *TM) Timeout(rm RM, opType int, before time.Time) error {
 
 	// recover using transaction log
-	ts := tm.store.ForManager(rm.Name(), time.Now().UnixNano())
+	ts := tm.store.ForManager(rm.Name(), before.UnixNano())
 	for _, t := range ts {
-		// operation
-		op := rm.ForOperation(t.OpType)
-		if err := json.Unmarshal(t.Operation, op); err != nil {
-			return err
-		}
+		if opType == 0 || t.OpType == opType {
+			// operation
+			op := rm.ForOperation(t.OpType)
+			if err := json.Unmarshal(t.Operation, op); err != nil {
+				return err
+			}
 
-		// do operation
-		rm.Operation(TxId(t.Id), t.OpType, op)
+			// do operation
+			rm.Operation(TxId(t.Id), t.OpType, op)
+		}
 	}
 	return nil
 }
