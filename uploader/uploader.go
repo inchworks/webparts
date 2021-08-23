@@ -174,7 +174,7 @@ func (up *Uploader) Initialise(log *log.Logger, db DB, tm *etx.TM) {
 	up.uploads = make(map[etx.TxId]int, 8)
 
 	// start background worker
-	up.tick = time.NewTicker(up.MaxAge/4)
+	up.tick = time.NewTicker(up.MaxAge/8)
 	go up.worker(up.chSave, up.chOrphans, up.tick.C, up.chDone)
 }
 
