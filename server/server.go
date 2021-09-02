@@ -24,8 +24,8 @@ type App interface {
 type Server struct {
 
 	// logging
-	ErrorLog  *log.Logger
-	InfoLog   *log.Logger
+	ErrorLog *log.Logger
+	InfoLog  *log.Logger
 
 	// HTTPS
 	CertEmail string   // notifications from Let's Encrypt
@@ -66,9 +66,8 @@ func (srv *Server) Serve(app App) {
 			},
 
 			// Preferences as recommended by Let's Go. No need to specify TLS1.3 suites.
-			PreferServerCipherSuites: true,
-			CurvePreferences:         []tls.CurveID{tls.X25519, tls.CurveP256},
-			MinVersion:               tls.VersionTLS12,
+			CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256},
+			MinVersion:       tls.VersionTLS12,
 			CipherSuites: []uint16{
 				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,

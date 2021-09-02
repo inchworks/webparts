@@ -87,6 +87,7 @@ type Uploader struct {
 	ThumbW     int
 	ThumbH     int
 	MaxAge     time.Duration // maximum time for a parent update
+	SnapshotAt time.Duration // snapshot time in video (-ve for none)
 	VideoTypes []string
 
 	// components
@@ -99,6 +100,10 @@ type Uploader struct {
 	chDone    chan bool
 	chSave    chan reqSave
 	chOrphans chan OpOrphans
+
+	// separate worker for video processing
+	chVideosDone chan bool
+	chConvert    chan reqConvert
 
 	// uploads in progress for each transaction
 	muUploads sync.Mutex
@@ -121,7 +126,7 @@ type OpOrphans struct {
 
 type reqSave struct {
 	name      string       // file name
-	tx        etx.TxId        // transaction ID, used to match media files with parent form
+	tx        etx.TxId     // transaction ID, used to match media files with parent form
 	mediaType int          // image or video
 	fullsize  bytes.Buffer // original image or video
 	img       image.Image  // nil for video
@@ -173,15 +178,23 @@ func (up *Uploader) Initialise(log *log.Logger, db DB, tm *etx.TM) {
 	up.chOrphans = make(chan OpOrphans, 4)
 	up.uploads = make(map[etx.TxId]int, 8)
 
+	up.chVideosDone = make(chan bool, 1)
+	up.chConvert = make(chan reqConvert, 20)
+
 	// start background worker
-	up.tick = time.NewTicker(up.MaxAge/8)
+	up.tick = time.NewTicker(up.MaxAge / 8)
 	go up.worker(up.chSave, up.chOrphans, up.tick.C, up.chDone)
+
+	// separate worker for video processing
+	// start background worker
+	go up.videoWorker(up.chConvert, up.chDone)
 }
 
 // Stop shuts down the uploader.
 func (up *Uploader) Stop() {
 	up.tick.Stop()
 	up.chDone <- true
+	up.chVideosDone <- true
 }
 
 // STEP 1 : web request received to create or update parent object.
@@ -251,7 +264,6 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId) (err error, byCl
 		}
 
 	case MediaVideo:
-		// ## examine video
 		if _, err := io.Copy(&buffered, file); err != nil {
 			return err, false // don't know why this might fail
 		}
@@ -332,19 +344,8 @@ func FileFromName(id etx.TxId, name string) string {
 // MediaType returns the media type (0 if not accepted)
 func (up *Uploader) MediaType(name string) int {
 
-	_, err := imaging.FormatFromFilename(name)
-	if err == nil {
-		return MediaImage
-	} else {
-		// check for acceptable video types
-		t := filepath.Ext(name)
-		for _, vt := range up.VideoTypes {
-			if t == vt {
-				return MediaVideo
-			}
-		}
-	}
-	return 0
+	mt, _, _ := getType(name, up.VideoTypes)
+	return mt
 }
 
 // ValidCode returns false if the transaction code for a set of uploads has expired.
@@ -385,7 +386,7 @@ func (up *Uploader) StartBind(parentId int64, tx etx.TxId) *Bind {
 
 	b := &Bind{
 		up:       up,
-		tx:     tx,
+		tx:       tx,
 		parentId: parentId,
 	}
 
@@ -445,18 +446,15 @@ func (b *Bind) File(fileName string) (string, error) {
 	// name and revision
 	_, name, rev := NameFromFile(fileName)
 
-	// convert non-displayable file types, to match converted image
-	// ## could we safely just check slide.Format
-	if up.MediaType(name) == MediaImage {
-		name, _ = changeType(name)
-	}
+	// change user's file type, to match converted media
+	name, _ = changeType(name, up.VideoTypes)
 	lc := strings.ToLower(name)
 
 	// current version
 	cv := b.versions[lc]
 	if cv.revision == 0 {
 		// we have a name but no image file - the client shouldn't allow this
-		return "", fmt.Errorf("Missing file upload for %v", fileName)
+		return "", fmt.Errorf("missing file upload for %v", fileName)
 	}
 
 	var err error
@@ -469,7 +467,7 @@ func (b *Bind) File(fileName string) (string, error) {
 			// the newly uploaded file is being used
 			cv.fileName, err = up.saveVersion(b.parentId, b.tx, name, cv.revision)
 			if err != nil {
-				return "", fmt.Errorf("Cannot bind upload for %v: %w", fileName, err)
+				return "", fmt.Errorf("cannot bind upload for %v: %w", fileName, err)
 			}
 			cv.upload = false
 		}
@@ -532,32 +530,53 @@ func Thumbnail(filename string) string {
 
 // IMPLEMENTATION
 
-// changeType normalises an image file extension, and indicates if it should be converted to a displayable type.
-func changeType(name string) (nm string, changed bool) {
+// getType returns the mediaType and normalised file extension, and indicates if it is converted.
+// A blank name is returned for an unsupported format.
+func getType(name string, videoTypes []string) (mediaType int, ext string, changed bool) {
 
-	// convert other file types to JPG
-	fmt, err := imaging.FormatFromFilename(name)
-	if err != nil {
-		return name, false
-	} // unikely error, never mind
+	if fmt, err := imaging.FormatFromFilename(name); err == nil {
+		// image formats
+		mediaType = MediaImage
 
-	var ext string
-	switch fmt {
-	case imaging.JPEG:
-		ext = ".jpg"
-		changed = false
+		switch fmt {
+		case imaging.JPEG:
+			ext = ".jpg"
+			changed = false
 
-	case imaging.PNG:
-		ext = ".png"
-		changed = false
+		case imaging.PNG:
+			ext = ".png"
+			changed = false
 
-	default:
-		// convert to JPG
-		ext = "jpg"
-		changed = true
+		default:
+			// convert to JPG
+			ext = "jpg"
+			changed = true
+		}
+	} else {
+		// acceptable video formats, all converted to MP4
+		t := strings.ToLower(filepath.Ext(name))
+		for _, vt := range videoTypes {
+			if t == vt {
+				mediaType = MediaVideo
+				ext = ".mp4"
+				changed = (t != ext)
+				break
+			}
+		}
 	}
 
-	nm = strings.TrimSuffix(name, filepath.Ext(name)) + ext
+	return
+}
+
+// changeType normalises a media file extension, and indicates if it should be converted to a displayable type.
+// A blank name is returned for an unsupported format.
+func changeType(name string, videoTypes []string) (nm string, changed bool) {
+	var mt int
+	var ext string
+
+	if mt, ext, changed = getType(name, videoTypes); mt != 0 {
+		nm = strings.TrimSuffix(name, filepath.Ext(name)) + ext
+	}
 	return
 }
 
@@ -608,11 +627,37 @@ func (im *Uploader) globVersions(pattern string) map[string]fileVersion {
 	return versions
 }
 
+// opDone dectements the count of in-progress uploads, and requests the next operation when ready,
+func (up *Uploader) opDone(tx etx.TxId) {
+
+	var next bool
+
+	// SERIALISED
+	up.muUploads.Lock()
+
+	// decrement uploads in progress
+	n := up.uploads[tx]
+	if n > 1 {
+		up.uploads[tx] = n - 1
+	} else {
+		// uploads complete
+		next = up.next[tx]
+		delete(up.next, tx)
+		delete(up.uploads, tx)
+	}
+	up.muUploads.Unlock()
+
+	// next operation
+	if next {
+		up.tm.DoNext(tx)
+	}
+}
+
 // removeMedia unlinks an image file and the corresponding thumbnail.
 // (If this is the sole link, the file is deleted)
 func (up *Uploader) removeMedia(fileName string) error {
 
-	// To make the operation idempotent, we accept that a file make already be deleted.
+	// To make the operation idempotent, we accept that a file may already be deleted.
 	if err := os.Remove(filepath.Join(up.FilePath, fileName)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -646,7 +691,7 @@ func (up *Uploader) removeOrphans(id etx.TxId) error {
 func (im *Uploader) saveImage(req reqSave) error {
 
 	// convert non-displayable file types to JPG
-	name, convert := changeType(req.name)
+	name, convert := changeType(req.name, []string{})
 
 	// path for saved files
 	filename := FileFromName(req.tx, name)
@@ -669,9 +714,7 @@ func (im *Uploader) saveImage(req reqSave) error {
 
 	} else {
 
-		// ## set compression option
-		// ## could sharpen, but how much?
-		// ## give someone else a chance - not sure if it helps
+		// ## Could set compression option, or sharpen, but how much?
 		resized := imaging.Fit(req.img, im.MaxW, im.MaxH, imaging.Lanczos)
 		runtime.Gosched()
 
@@ -681,10 +724,10 @@ func (im *Uploader) saveImage(req reqSave) error {
 	}
 
 	// save thumbnail
-	thumbnail := imaging.Fit(req.img, im.ThumbW, im.ThumbH, imaging.Lanczos)
-	if err := imaging.Save(thumbnail, thumbPath); err != nil {
+	if err := im.saveThumbnail(req.img, thumbPath); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -695,34 +738,25 @@ func (up *Uploader) saveMedia(req reqSave) error {
 	switch req.mediaType {
 	case MediaImage:
 		err = up.saveImage(req)
+		up.opDone(req.tx)
 
 	case MediaVideo:
-		err = up.saveVideo(req)
-	}
-
-	// SERIALISED
-	up.muUploads.Lock()
-	tx := req.tx
-	var next bool
-
-	// decrement uploads in progress
-	n := up.uploads[tx]
-	if n > 1 {
-		up.uploads[tx] = n - 1
-	} else {
-		// uploads complete
-		next = up.next[tx]
-		delete(up.next, tx)
-		delete(up.uploads, tx)
-	}
-	up.muUploads.Unlock()
-
-	// next operation
-	if next {
-		up.tm.DoNext(tx)
+		var done bool
+		done, err = up.saveVideo(req)
+		if done {
+			up.opDone(req.tx)
+		}
+		// otherwise, processing continued in video worker
 	}
 
 	return err
+}
+
+// saveThumbnail generates a thumbnail for an image
+func (up *Uploader) saveThumbnail(img image.Image, to string) error {
+	// save thumbnail
+	thumbnail := imaging.Fit(img, up.ThumbW, up.ThumbH, imaging.Lanczos)
+	return imaging.Save(thumbnail, to)
 }
 
 // saveVersion saves a new file with a revision number.
@@ -751,34 +785,7 @@ func (im *Uploader) saveVersion(parentId int64, tx etx.TxId, name string, rev in
 	return revised, err
 }
 
-// saveVideo completes video saving, converting as needed.
-func (im *Uploader) saveVideo(req reqSave) error {
-
-	// path for saved file
-	fn := FileFromName(req.tx, req.name)
-	savePath := filepath.Join(im.FilePath, fn)
-
-	// save uploaded file unchanged
-	saved, err := os.OpenFile(savePath, os.O_WRONLY|os.O_CREATE, 0666)
-	if err != nil {
-		return err // could be a bad name?
-	}
-	defer saved.Close()
-	if _, err = io.Copy(saved, &req.fullsize); err != nil {
-		return err
-	}
-
-	// set thumbnail, replacing video type by JPG
-	// ## This is temporary, as I hope to generate a thumbnail for each video in future.
-	// ## So no provision for app to customise the thumbnail.
-	if err = copyStatic(im.FilePath, Thumbnail(fn), WebFiles, "web/static/video.jpg"); err != nil {
-		return nil
-	}
-
-	return nil
-}
-
-// worker does all background processing for PicInch.
+// worker does background processing for media.
 func (up *Uploader) worker(
 	chSave <-chan reqSave,
 	chOrphans <-chan OpOrphans,
@@ -803,7 +810,7 @@ func (up *Uploader) worker(
 				up.errorLog.Print(err.Error())
 			}
 
-		case <- chTick:
+		case <-chTick:
 			// cutoff time for orphans
 			cutoff := time.Now().Add(-1 * up.MaxAge)
 
