@@ -81,14 +81,15 @@ const (
 type Uploader struct {
 
 	// parameters
-	FilePath   string
-	MaxW       int
-	MaxH       int
-	ThumbW     int
-	ThumbH     int
-	MaxAge     time.Duration // maximum time for a parent update
-	SnapshotAt time.Duration // snapshot time in video (-ve for none)
-	VideoTypes []string
+	FilePath     string
+	MaxW         int
+	MaxH         int
+	ThumbW       int
+	ThumbH       int
+	MaxAge       time.Duration // maximum time for a parent update
+	SnapshotAt   time.Duration // snapshot time in video (-ve for none)
+	VideoPackage string        // software for video processing: ffmpeg, or a docker-hosted implementation of ffmpeg, for debugging
+	VideoTypes   []string
 
 	// components
 	errorLog *log.Logger
@@ -179,22 +180,27 @@ func (up *Uploader) Initialise(log *log.Logger, db DB, tm *etx.TM) {
 	up.uploads = make(map[etx.TxId]int, 8)
 
 	up.chVideosDone = make(chan bool, 1)
-	up.chConvert = make(chan reqConvert, 20)
 
 	// start background worker
 	up.tick = time.NewTicker(up.MaxAge / 8)
 	go up.worker(up.chSave, up.chOrphans, up.tick.C, up.chDone)
 
 	// separate worker for video processing
-	// start background worker
-	go up.videoWorker(up.chConvert, up.chDone)
+	if up.VideoPackage != "" {
+		up.chConvert = make(chan reqConvert, 20)
+		go up.videoWorker(up.chConvert, up.chDone)
+	} else {
+		up.SnapshotAt = -1 // no snapshots
+	}
 }
 
 // Stop shuts down the uploader.
 func (up *Uploader) Stop() {
 	up.tick.Stop()
 	up.chDone <- true
-	up.chVideosDone <- true
+	if up.VideoPackage != "" {
+		up.chVideosDone <- true
+	}
 }
 
 // STEP 1 : web request received to create or update parent object.
@@ -438,7 +444,7 @@ func (b *Bind) File(fileName string) (string, error) {
 
 	up := b.up
 
-	// is there an image?
+	// is there an media file?
 	if fileName == "" {
 		return "", nil
 	}
