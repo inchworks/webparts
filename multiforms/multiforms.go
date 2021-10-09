@@ -35,8 +35,6 @@ import (
 	"unicode/utf8"
 )
 
-// ## Does this belong here, as not referenced?
-
 // EmailRX is a regular expression for an email address, as recommended by W3C and Web Hypertext Application Technology Working Group.
 var EmailRX = regexp.MustCompile("^[a-zA-Z0-9.!#$%&'*+\\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$")
 

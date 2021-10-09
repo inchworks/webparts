@@ -177,6 +177,7 @@ func (up *Uploader) Initialise(log *log.Logger, db DB, tm *etx.TM) {
 	up.chDone = make(chan bool, 1)
 	up.chSave = make(chan reqSave, 20)
 	up.chOrphans = make(chan OpOrphans, 4)
+	up.next = make(map[etx.TxId]bool, 8)
 	up.uploads = make(map[etx.TxId]int, 8)
 
 	up.chVideosDone = make(chan bool, 1)
@@ -633,7 +634,7 @@ func (im *Uploader) globVersions(pattern string) map[string]fileVersion {
 	return versions
 }
 
-// opDone dectements the count of in-progress uploads, and requests the next operation when ready,
+// opDone decrements the count of in-progress uploads, and requests the next operation when ready.
 func (up *Uploader) opDone(tx etx.TxId) {
 
 	var next bool
