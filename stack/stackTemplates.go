@@ -10,10 +10,10 @@ import (
 
 // NewTemplates returns a cache of HTML page templates for an application, with added package and site templates.
 //
-// The cache is built from the file organisation suggested by Let's Go by Alex Edwards.
-// A page.tmpl file specifies the name and content of am HTML page in the cache.
-// A layout.tmpl file defines a common layout for a set of pages.
-// Partial.tmpl files define common content across multiple pages and layouts.
+// The cache is built using the file organisation suggested by Let's Go by Alex Edwards:
+// a page.tmpl file specifies the name and content of am HTML page in the cache;
+// a layout.tmpl file defines a common layout for a set of pages;
+// partial.tmpl files define common content across multiple pages and layouts.
 //
 // Application template definitions override package templates of the same name.
 // Similarly, site template definitions override application templates by name.

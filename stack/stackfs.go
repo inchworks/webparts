@@ -20,7 +20,7 @@ type StackFS struct {
 	top     fs.FS
 }
 
-// New returns a combined file system for a stack of file systems (base first).
+// NewFS returns a combined file system for a stack of file systems (base first).
 func NewFS(stack ...fs.FS) (fs.FS, error) {
 
 	sfs := StackFS{ stacked: make(map[string]fs.FS, 16) }
@@ -60,7 +60,7 @@ func NewFS(stack ...fs.FS) (fs.FS, error) {
 	return sfs, nil
 }
 
-// Open opens the named file.
+// Open returns the interface to a named file in the stack.
 func (sfs StackFS) Open(name string) (fs.File, error) {
 
 	// check the stack for a known file

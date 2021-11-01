@@ -6,6 +6,9 @@
 // that modifies the parent. The parent need not exist at the time of upload,
 // and a log is used to maintain consistency between the database and the media files.
 //
+// Images are resized to fit within limits specified by the server.
+// Videos are converted to MP4 format. Thumbnails are generated for both images and videos.
+//
 // Note that files are given revision numbers for these reasons:
 // (1) A different name forces browsers to fetch the updated file after its content has been changed.
 // (2) It allows us to upload an file without overwriting the current one, and then forget it if the update form is not submitted.
@@ -78,6 +81,7 @@ const (
 	MediaVideo = 2
 )
 
+// Uploader holds the parameters and state for uplading files. Typically only one is needed.
 type Uploader struct {
 
 	// parameters
@@ -145,11 +149,12 @@ type fileVersion struct {
 	keep     bool
 }
 
-// webFiles are the package's web resources (templates and static files)
+// WebFiles are the package's web resources (templates and static files)
 //go:embed web
 var WebFiles embed.FS
 
-// Implement RM interface for webparts.etx.
+// Name, ForOperation and Operaion implement the RM interface for webparts.etx.
+
 func (up *Uploader) Name() string {
 	return "webparts.uploader"
 }
@@ -204,9 +209,9 @@ func (up *Uploader) Stop() {
 	}
 }
 
-// STEP 1 : web request received to create or update parent object.
+// STEP 1 : when web request received to create or update parent object.
 
-// Transaction returns an identifier for an update that may include a set of uploads.
+// Begin returns an identifier for an update that may include a set of uploads.
 // It expects that a database transaction (needed to write redo records) has been started.
 func (up *Uploader) Begin() (string, error) {
 
@@ -239,7 +244,7 @@ func NameFromFile(fileName string) (string, string, int) {
 	}
 }
 
-// STEP 2 : AJAX request received to upload file.
+// STEP 2 : when AJAX request received to upload file.
 
 // Save decodes an uploaded file, and schedules it to be saved in the filesystem.
 func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId) (err error, byClient bool) {
@@ -298,7 +303,7 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId) (err error, byCl
 	return nil, true
 }
 
-// STEP 3 : web form to create or update parent object received.
+// STEP 3 : when web form to create or update parent object received.
 
 // CleanName removes unwanted characters from a filename, to make it safe for display and storage.
 // From https://stackoverflow.com/questions/54461423/efficient-way-to-remove-all-non-alphanumeric-characters-from-large-text.
@@ -324,7 +329,7 @@ func CleanName(name string) string {
 	return string(s[:j])
 }
 
-// fileFromName returns a stored file name from a user's name for an media file.
+// fileFromNameRev returns a stored file name from a user's name for a saved media file.
 // Once the parent update has been saved, the owner is the parent ID and the name has a revision number.
 func fileFromNameRev(ownerId int64, name string, rev int) string {
 	if name != "" {
@@ -337,8 +342,8 @@ func fileFromNameRev(ownerId int64, name string, rev int) string {
 	}
 }
 
-// FileFromTxName returns a stored file name from a user's name for an media file.
-// For a newly uploaded file, the owner is a transaction code, because the parent object may not exist yet.
+// FileFromName returns a stored file name from a user's name for a newly uploaded file.
+// The owner is a transaction code, because the parent object may not exist yet.
 // It has no revision number, so it doesn't overwrite a previous copy yet.
 func FileFromName(id etx.TxId, name string) string {
 	if name != "" {
@@ -348,7 +353,7 @@ func FileFromName(id etx.TxId, name string) string {
 	}
 }
 
-// MediaType returns the media type (0 if not accepted)
+// MediaType returns the media type. It is 0 if not accepted.
 func (up *Uploader) MediaType(name string) int {
 
 	mt, _, _ := getType(name, up.VideoTypes)
@@ -385,7 +390,7 @@ func (up *Uploader) DoNext(tx etx.TxId) {
 	}
 }
 
-// STEP 4 : asyncronous processing of parent update.
+// STEP 4 : asyncronous processing of a parent update.
 
 // StartBind initiates linking a parent object to a set of uploaded files, returning a context for calls to Bind and EndBind.
 // It loads updated file versions. tx is 0 when we are deleting a parent object.
@@ -490,8 +495,8 @@ func (b *Bind) File(fileName string) (string, error) {
 
 // End completes the linking a parent object. It deletes unused files.
 // This includes:
-//  - old versions that have been superseded,
-//  - the upload names (resulting in deletion if the file wasn't referenced in the saved parent)
+//  - old versions that have been superseded;
+//  - the upload names (resulting in deletion if the file wasn't referenced in the saved parent);
 //  - files that are no referenced no more.
 func (b *Bind) End() error {
 
@@ -516,7 +521,7 @@ func (b *Bind) End() error {
 
 // DISPLAY MEDIA FILES
 
-// Thumbnail returns the prefixed name for a thumbnail
+// Thumbnail returns the prefixed name for a thumbnail.
 func Thumbnail(filename string) string {
 
 	switch filepath.Ext(filename) {

@@ -50,6 +50,8 @@ const (
 	UserSuspended = 0 // blocked from access or registration
 	UserKnown     = 1 // allowed to register and set display name and password
 	UserActive    = 2 // registered
+
+	MaxName = 60 // maximum name characters
 )
 
 // User struct holds the stored data for a user.

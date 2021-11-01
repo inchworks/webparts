@@ -16,7 +16,7 @@ const (
 	redMissed   = 20   // max number missed consecutively, for red status
 )
 
-// Period reports the status of a client for a monitoring period,
+// A Period reports the status of a client for a monitoring period.
 type Period struct {
 	Lost    int64 // excluding current outage
 	Missed  int64 // missed in current outage
@@ -25,7 +25,7 @@ type Period struct {
 	start   time.Time // period start
 }
 
-// Monitor reports the status of a client for a set of monitoring periods.
+// Monitored holds the status of a client for a set of monitoring periods.
 type Monitored struct {
 	Name         string
 	Periods      [monitorPeriods]Period
@@ -33,6 +33,7 @@ type Monitored struct {
 	last         time.Time
 }
 
+// Monitor holds the status of a set of clients.
 type Monitor struct {
 	mu      sync.Mutex
 	names   map[string]int
@@ -126,7 +127,7 @@ func (m *Monitor) Status() []Monitored {
 	return m.clients // a copy of the client statuses (I trust)
 }
 
-// Client is alive (called with lock).
+// aliveLocked is called to note that a client is alive (called with lock).
 func (m *Monitor) aliveLocked(clientIx int) {
 
 	now := time.Now()
@@ -137,7 +138,7 @@ func (m *Monitor) aliveLocked(clientIx int) {
 	c.last = now
 }
 
-// Processing at end of each period.
+// endPeriod is called to procesd the end of each period.
 func (m *Monitor) endPeriod() {
 
 	m.mu.Lock()
@@ -161,7 +162,7 @@ func (m *Monitor) endPeriod() {
 	}
 }
 
-// Set current status for each client.
+// updateStatuses sets current status for each client.
 func (m *Monitor) updateStatuses() {
 
 	// evaluate status for each client
@@ -183,13 +184,13 @@ func (m *Monitor) updateStatuses() {
 	}
 }
 
-// Half-intervals since time t.
+// halfIntervals returns the number of half-intervals since time t.
 func (c *Monitored) halfIntervalsSince(t time.Time) int64 {
 
 	return time.Since(t).Nanoseconds() / c.halfInterval.Nanoseconds()
 }
 
-// Update monitoring statistics.
+// update is called to update monitoring statistics.
 func (c *Monitored) update(alive bool) *Period {
 
 	p := &c.Periods[0]

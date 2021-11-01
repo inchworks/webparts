@@ -38,7 +38,7 @@ import (
 // EmailRX is a regular expression for an email address, as recommended by W3C and Web Hypertext Application Technology Working Group.
 var EmailRX = regexp.MustCompile("^[a-zA-Z0-9.!#$%&'*+\\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$")
 
-// Form struct, holds form data (in url.Values) and validation errors.
+// Form holds form data (in url.Values) and validation errors.
 type Form struct {
 	url.Values
 	CSRFToken   string
@@ -46,6 +46,7 @@ type Form struct {
 	ChildErrors childErrors
 }
 
+// Child specifies a child form.
 type Child struct {
 	Parent     *Form
 	ChildIndex int
@@ -65,7 +66,7 @@ func New(data url.Values, token string) *Form {
 	}
 }
 
-// ChildGet returns a string value from a field in a child form. The field may be empty.
+// ChildGet is deprecated. Use ChildText.
 func (f *Form) ChildGet(field string, i int) string {
 
 	return f.Values[field][i] // url.Values is a map[string][]string. First item is the template.
@@ -173,7 +174,7 @@ func (f *Form) ChildPositive(field string, i int, ix int) int {
 	return n
 }
 
-// ChildRequired returns the trimmed text required from a child form.
+// ChildRequired is deprecated. Use ChildText.
 func (f *Form) ChildRequired(field string, i int, ix int) string {
 
 	// don't validate template
@@ -211,7 +212,35 @@ func (f *Form) ChildSelect(field string, i int, ix int, nOptions int) (int, erro
 	return n, nil
 }
 
-// ChildTrimmed returns the trimmed optional text from child form.
+// ChildText returns trimmed text a child form, validating the value length.
+// Set min=1 for a required value, max<=0 for no upper size.
+func (f *Form) ChildText(field string, i int, ix int, min int, max int) string {
+
+	// don't validate template
+	if ix == -1 {
+		return ""
+	}
+
+	// url.Values is a map[string][]string. First item is the template.
+	value := strings.TrimSpace(f.Values[field][i])
+
+	// validate length
+	l := utf8.RuneCountInString(value)
+	if min > 0 {
+		if l == 0 {
+			f.ChildErrors.Add(field, ix, "Cannot be blank")
+		} else if l < min {
+			f.ChildErrors.Add(field, ix, fmt.Sprintf("Too short (minimum %d characters)", min))
+		}
+	}
+	if max > 0 && l > max {
+		f.ChildErrors.Add(field, ix, fmt.Sprintf("Too long (maximum %d characters)", max))
+	}
+
+	return value
+}
+
+// ChildTrimmed is deprecated. Use ChildText.
 func (f *Form) ChildTrimmed(field string, i int) string {
 
 	return strings.TrimSpace(f.Values[field][i])
@@ -317,7 +346,7 @@ func (f *Form) Valid() bool {
 // From https://stackoverflow.com/questions/34839811/how-to-retrieve-form-data-as-array
 func pArseFormCollection(r *http.Request, typeName string) []map[string]string {
 
-	// ## Never used! Repacks into another map, and still need to process that. Might be useful for complex fields. 
+	// ## Never used! Repacks into another map, and still need to process that. Might be useful for complex fields.
 
 	var result []map[string]string
 	r.ParseForm()
@@ -387,13 +416,4 @@ func (c *Child) ChildValid(field string) string {
 		return ""
 	}
 	return "is-invalid"
-}
-
-// WebPath returns a path to the package's web resources (templates and static files), if accessible,
-// They will not be available if running without source code. In this case the parent
-// must use a copy made during the application build.
-func WebPath() (string, error) {
-
-	// ## not needed with embedded file, left until quiz app changed
-	return "", nil
 }

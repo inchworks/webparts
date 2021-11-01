@@ -84,8 +84,8 @@ func (f *UsersForm) GetUsers(nRoleOpts int) (items []*UserFormData, err error) {
 
 		items = append(items, &UserFormData{
 			Child:       multiforms.Child{Parent: &f.Form, ChildIndex: ix},
-			Username:    f.ChildRequired("username", i, ix),
-			DisplayName: f.ChildRequired("displayName", i, ix),
+			Username:    f.ChildText("username", i, ix, 8, MaxName),
+			DisplayName: f.ChildText("displayName", i, ix, 1, MaxName),
 			Role:        role,
 			Status:      status,
 		})

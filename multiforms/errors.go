@@ -12,7 +12,7 @@ func (e formErrors) Add(field, message string) {
 	e[field] = append(e[field], message)
 }
 
-// Add appends an error message for a given child field
+// Add appends an error message for a given child field.
 func (e childErrors) Add(field string, ix int, message string) {
 	// allow the child maps to be nil
 	if e[field] == nil {
@@ -31,7 +31,7 @@ func (e formErrors) Get(field string) string {
 	return es[0]
 }
 
-// Get retrieves the first error message for a specified field from the map.
+// Get retrieves the first error message for a specified child field from the map.
 func (e childErrors) Get(field string, ix int) string {
 	es := e[field][ix]
 	if len(es) == 0 {

@@ -21,6 +21,7 @@ type App interface {
 	Routes() http.Handler
 }
 
+// Server specifies the parameters for a web server.
 type Server struct {
 
 	// logging
@@ -103,7 +104,8 @@ func (srv *Server) Serve(app App) {
 
 }
 
-// Redirect HTTP requests to HTTPS, taken from autocert. Changed to do 301 redirect.
+// handleHTTPRedirect redirects HTTP requests to HTTPS.
+// Copied from autocert and changed to do 301 redirect.
 func handleHTTPRedirect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" && r.Method != "HEAD" {
 		http.Error(w, "Use HTTPS", http.StatusBadRequest)
@@ -121,7 +123,7 @@ func stripPort(hostport string) string {
 	return net.JoinHostPort(host, "443")
 }
 
-// Make HTTP server, with appropriate timeout settings.
+// newServer makes an HTTP server, with appropriate timeout settings.
 func newServer(addr string, handler http.Handler, log *log.Logger, main bool) *http.Server {
 
 	// common server parameters for HTTP/HTTPS
