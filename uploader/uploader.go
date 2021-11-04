@@ -81,7 +81,13 @@ const (
 	MediaVideo = 2
 )
 
-// Uploader holds the parameters and state for uplading files. Typically only one is needed.
+// op holds the state of uploading media for a single transaction
+type op struct {
+	next    bool // true if the parent's next operation has been specified
+	uploads int  // number of uploads in progress
+}
+
+// Uploader holds the parameters and state for uploading files. Typically only one is needed.
 type Uploader struct {
 
 	// parameters
@@ -112,8 +118,7 @@ type Uploader struct {
 
 	// uploads in progress for each transaction
 	muUploads sync.Mutex
-	next      map[etx.TxId]bool
-	uploads   map[etx.TxId]int
+	ops     map[etx.TxId]op
 }
 
 // Context for a sequence of bind calls.
@@ -182,8 +187,7 @@ func (up *Uploader) Initialise(log *log.Logger, db DB, tm *etx.TM) {
 	up.chDone = make(chan bool, 1)
 	up.chSave = make(chan reqSave, 20)
 	up.chOrphans = make(chan OpOrphans, 4)
-	up.next = make(map[etx.TxId]bool, 8)
-	up.uploads = make(map[etx.TxId]int, 8)
+	up.ops = make(map[etx.TxId]op, 8)
 
 	up.chVideosDone = make(chan bool, 1)
 
@@ -288,7 +292,9 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId) (err error, byCl
 	up.muUploads.Lock()
 
 	// count uploads in progress
-	up.uploads[tx] = up.uploads[tx] + 1
+	op := up.ops[tx]
+	op.uploads++
+	up.ops[tx] = op
 	up.muUploads.Unlock()
 
 	// resizing or converting is slow, so do the remaining processing in background worker
@@ -377,10 +383,19 @@ func (up *Uploader) DoNext(tx etx.TxId) {
 	// SERIALISED
 	up.muUploads.Lock()
 
+	// #### There is no way we should lose the operation map, but somehow it has happened, twice.
+	// Deserialise before we panic, so that we don't hang all new uploads until we run out of memory :-(.
+	if up.ops == nil {
+		up.muUploads.Unlock()
+		panic("Uploader: missing ops map!")
+	}
+
 	// uploads in progress?
-	wait := up.uploads[tx] > 0
+	op := up.ops[tx]
+	wait := op.uploads > 0
 	if wait {
-		up.next[tx] = true
+		op.next = true
+		up.ops[tx] = op
 	}
 	up.muUploads.Unlock()
 
@@ -619,7 +634,7 @@ func copyStatic(toDir, name string, fromFS fs.FS, path string) error {
 }
 
 // globVersions finds versions of new or existing files.
-func (im *Uploader) globVersions(pattern string) map[string]fileVersion {
+func (up *Uploader) globVersions(pattern string) map[string]fileVersion {
 
 	versions := make(map[string]fileVersion)
 
@@ -648,14 +663,14 @@ func (up *Uploader) opDone(tx etx.TxId) {
 	up.muUploads.Lock()
 
 	// decrement uploads in progress
-	n := up.uploads[tx]
-	if n > 1 {
-		up.uploads[tx] = n - 1
+	op := up.ops[tx]
+	if op.uploads > 1 {
+		op.uploads--
+		up.ops[tx] = op
 	} else {
 		// uploads complete
-		next = up.next[tx]
-		delete(up.next, tx)
-		delete(up.uploads, tx)
+		next = op.next
+		delete(up.ops, tx)
 	}
 	up.muUploads.Unlock()
 
@@ -700,19 +715,19 @@ func (up *Uploader) removeOrphans(id etx.TxId) error {
 }
 
 // saveImage completes image saving, converting and resizing as needed.
-func (im *Uploader) saveImage(req reqSave) error {
+func (up *Uploader) saveImage(req reqSave) error {
 
 	// convert non-displayable file types to JPG
 	name, convert := changeType(req.name, []string{})
 
 	// path for saved files
 	filename := FileFromName(req.tx, name)
-	savePath := filepath.Join(im.FilePath, filename)
-	thumbPath := filepath.Join(im.FilePath, Thumbnail(filename))
+	savePath := filepath.Join(up.FilePath, filename)
+	thumbPath := filepath.Join(up.FilePath, Thumbnail(filename))
 
 	// check if uploaded image small enough to save
 	size := req.img.Bounds().Size()
-	if size.X <= im.MaxW && size.Y <= im.MaxH && !convert {
+	if size.X <= up.MaxW && size.Y <= up.MaxH && !convert {
 
 		// save uploaded file unchanged
 		saved, err := os.OpenFile(savePath, os.O_WRONLY|os.O_CREATE, 0666)
@@ -727,7 +742,7 @@ func (im *Uploader) saveImage(req reqSave) error {
 	} else {
 
 		// ## Could set compression option, or sharpen, but how much?
-		resized := imaging.Fit(req.img, im.MaxW, im.MaxH, imaging.Lanczos)
+		resized := imaging.Fit(req.img, up.MaxW, up.MaxH, imaging.Lanczos)
 		runtime.Gosched()
 
 		if err := imaging.Save(resized, savePath); err != nil {
@@ -736,7 +751,7 @@ func (im *Uploader) saveImage(req reqSave) error {
 	}
 
 	// save thumbnail
-	if err := im.saveThumbnail(req.img, thumbPath); err != nil {
+	if err := up.saveThumbnail(req.img, thumbPath); err != nil {
 		return err
 	}
 
@@ -772,7 +787,7 @@ func (up *Uploader) saveThumbnail(img image.Image, to string) error {
 }
 
 // saveVersion saves a new file with a revision number.
-func (im *Uploader) saveVersion(parentId int64, tx etx.TxId, name string, rev int) (string, error) {
+func (up *Uploader) saveVersion(parentId int64, tx etx.TxId, name string, rev int) (string, error) {
 
 	// Link the file, rather than rename it, so the current version of the parent continues to work.
 	// We'll remove the old name once the parent update has been committed.
@@ -782,15 +797,15 @@ func (im *Uploader) saveVersion(parentId int64, tx etx.TxId, name string, rev in
 	revised := fileFromNameRev(parentId, name, rev)
 
 	// main image ..
-	uploadedPath := filepath.Join(im.FilePath, uploaded)
-	revisedPath := filepath.Join(im.FilePath, revised)
+	uploadedPath := filepath.Join(up.FilePath, uploaded)
+	revisedPath := filepath.Join(up.FilePath, revised)
 	if err := os.Link(uploadedPath, revisedPath); err != nil {
 		return revised, err
 	}
 
 	// .. and thumbnail
-	uploadedPath = filepath.Join(im.FilePath, Thumbnail(uploaded))
-	revisedPath = filepath.Join(im.FilePath, Thumbnail(revised))
+	uploadedPath = filepath.Join(up.FilePath, Thumbnail(uploaded))
+	revisedPath = filepath.Join(up.FilePath, Thumbnail(revised))
 	err := os.Link(uploadedPath, revisedPath)
 
 	// rename with a revision number
