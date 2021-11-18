@@ -576,7 +576,7 @@ func getType(name string, videoTypes []string) (mediaType int, ext string, chang
 
 		default:
 			// convert to JPG
-			ext = "jpg"
+			ext = ".jpg"
 			changed = true
 		}
 	} else {
