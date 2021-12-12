@@ -36,6 +36,9 @@ type App interface {
 	// Render writes an HTTP response using the specified template and template field Users
 	Render(w http.ResponseWriter, r *http.Request, template string, usersData interface{})
 
+	// Rollback requests that the transaction started by Serialise be cancelled.
+	Rollback()
+
 	// Serialise optionally requests application-level serialisation.
 	// If updates=true, the store is to be updated and a transaction might be started (especially if a user is to be added or deleted).
 	// The returned function will be called at the end of the operation.
@@ -76,7 +79,7 @@ type UserStore interface {
 	GetNamed(username string) (*User, error) // get user for username (expected to be unique)
 	IsNoRecord(error) bool							// true if error is "record not found"
 	Name(id int64) string                           // get display name for user by database ID
-	Rollback()                                      // request update rollback
+	Rollback()                                      // (redundant)
 	Update(s *User) error                           // add or update user
 }
 

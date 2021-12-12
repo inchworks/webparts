@@ -144,6 +144,7 @@ func (ua *Users) onEditUsers(usSrc []*UserFormData) etx.TxId {
 
 			} else {
 				// out of sequence team index
+				app.Rollback()
 				return 0
 			}
 		}
