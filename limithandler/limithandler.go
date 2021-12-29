@@ -1,12 +1,13 @@
 // Copyright © Rob Burke inchworks.com, 2020.
 
-// Package limihandler implements a rate limiter for HTTP requests.
+// Package limithandler implements a rate limiter for HTTP requests.
 //
 // It is based on https://www.alexedwards.net/blog/how-to-rate-limit-http-requests,
 // with an interface model copied loosely from https://github.com/justinas/nosurf.
 package limithandler
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -17,13 +18,16 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const precision = 8 // precision of timing
+const (
+	escalate  = 3 // ban escalation per level (multiply by 1<<escalate = 8)
+	precision = 8 // precision of timing
+)
 
 type Handler struct {
 	limit *limiter
 
 	// handlers wrapped
-	banned http.Handler
+	banned  http.Handler
 	failure http.Handler
 	report  func(*http.Request, string, string)
 	success http.Handler
@@ -34,9 +38,9 @@ type Handlers struct {
 	forget      time.Duration
 	visitorAddr func(*http.Request) string
 
-	limiters  map[string]*limiter
-	release    *time.Ticker
-	chDone    <-chan bool
+	limiters map[string]*limiter
+	release  *time.Ticker
+	chDone   <-chan bool
 }
 
 type limiter struct {
@@ -56,13 +60,14 @@ type limiter struct {
 // rate limiter for each visitor
 type visitor struct {
 	limiter  *rate.Limiter
-	lastBan  time.Time
 	lastSeen time.Time
 	rejects  int
+	banTo    time.Time
+	banLevel int
 }
 
 // Allow checks the client's HTTP request rate against a limit. If rejected, it returns a suggested status code.
-func (lh *Handler) Allow(r *http.Request) (bool, int) {
+func (lh *Handler) Allow(r *http.Request) (ok bool, status int) {
 
 	lim := lh.limit
 	lhs := lim.lhs
@@ -74,19 +79,21 @@ func (lh *Handler) Allow(r *http.Request) (bool, int) {
 	ip, _, err := net.SplitHostPort(lhs.visitorAddr(r))
 	if err != nil {
 		log.Println(err.Error())
-		return true, 0  // safer not to block access
+		ok = true // safer not to block access
+		return
 	}
 
 	// limiter for this limit and visitor
 	v := lim.visitor(ip)
-	if v.rejects > lim.banAfter || !v.lastBan.IsZero() || v.limiter.Allow() == false {
+	if v.rejects > lim.banAfter || !v.banTo.IsZero() || v.limiter.Allow() == false {
 
 		// count rejections and report first one
-		status := lh.reject(r, ip, v)
-		return false, status
+		status = lh.reject(r, ip, v)
+		return
 	}
 
-	return true, 0
+	ok = true
+	return
 }
 
 // New returns a LimitHandler for a specified rate limit.
@@ -107,7 +114,7 @@ func (lhs *Handlers) New(limit string, every time.Duration, burst int, banAfter 
 	}
 	return &Handler{
 		limit:   lim,
-		banned: http.HandlerFunc(defaultBannedHandler),
+		banned:  http.HandlerFunc(defaultBannedHandler),
 		failure: http.HandlerFunc(defaultFailureHandler),
 		report:  defaultReportHandler,
 		success: next,
@@ -150,7 +157,7 @@ func (lhs *Handlers) SetVisitorAddr(fn func(*http.Request) string) {
 	lhs.visitorAddr = fn
 }
 
-// Start returns a LimitHandler. Typically only one is needed.
+// Start returns a set of limitHandlers. Typically only one set is needed.
 func Start(ban time.Duration, forget time.Duration) *Handlers {
 
 	var tick time.Duration
@@ -166,7 +173,7 @@ func Start(ban time.Duration, forget time.Duration) *Handlers {
 		visitorAddr: defaultVisitorAddr,
 
 		limiters: make(map[string]*limiter),
-		release:   time.NewTicker(tick),
+		release:  time.NewTicker(tick),
 	}
 
 	// start background goroutine to remove old entries from the visitors map
@@ -183,24 +190,26 @@ func (lhs *Handlers) Stop() {
 // ban blocks a misbehaving visitor
 func (lim *limiter) ban(r *http.Request, ip string, v *visitor) {
 
-	v.lastBan = time.Now()
+	// escalate the ban following previous bans
+	v.banLevel++
+	v.banTo = time.Now().Add(lim.lhs.banFor << (v.banLevel * escalate))
 
 	// extend ban to other limits
-
 	for _, l := range lim.alsoBan {
 		lim1 := lim.lhs.limiters[l]
 
 		if lim1 != nil {
 			v1 := lim1.visitor(ip)
-			v1.lastBan = time.Now()
+			v1.banTo = v.banTo
+			v1.banLevel = v.banLevel
 			v1.rejects = 0
 		}
 	}
 }
 
-// defaultFailureHandler calls an HTTP error for limit failures.
+// defaultBannedHandler calls an HTTP error for a banned IP address.
 func defaultBannedHandler(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "Banned for Suspected Intrusion Attempt", http.StatusForbidden)
+	http.Error(w, "Banned for suspected intrusion attempt", http.StatusForbidden)
 }
 
 // defaultFailureHandler calls an HTTP error for limit failures.
@@ -227,7 +236,7 @@ func (lh *Handler) reject(r *http.Request, ip string, v *visitor) int {
 	v.rejects++
 
 	// check for added ban first, because the limit could be 1
-	if !v.lastBan.IsZero() {
+	if !v.banTo.IsZero() {
 		if v.rejects == 1 {
 			lh.report(r, ip, "also banned")
 		}
@@ -238,8 +247,8 @@ func (lh *Handler) reject(r *http.Request, ip string, v *visitor) int {
 	if v.rejects == lim.banAfter {
 
 		// ban threshold reached for first time
-		lh.report(r, ip, "banned")
 		lim.ban(r, ip, v)
+		lh.report(r, ip, fmt.Sprint("banned at level ", v.banLevel))
 		return http.StatusForbidden
 
 	} else if v.rejects == 1 {
@@ -261,12 +270,23 @@ func (lhs *Handlers) worker() {
 				lim.mu.Lock()
 
 				for id, v := range lim.visitors {
-		
-					if time.Since(v.lastSeen) > lhs.forget {
-						delete(lim.visitors, id) // forget old visitors
 
-					} else if !v.lastBan.IsZero() && time.Since(v.lastBan) > lhs.banFor {
-						v.lastBan = time.Time{} // lift ban
+					if v.banLevel == 0 {
+						// forget old good visitors quickly
+						if time.Since(v.lastSeen) > lhs.forget {
+							delete(lim.visitors, id)
+						}
+
+					} else if v.banTo.IsZero() {
+						// remember bad visitors for longer - twice their last ban
+						forget := lhs.banFor << (v.banLevel*escalate + 1)
+						if time.Since(v.lastSeen) > forget {
+							delete(lim.visitors, id)
+						}
+
+					} else if time.Since(v.banTo) > 0 {
+						// lift ban
+						v.banTo = time.Time{}
 						v.rejects = 0
 					}
 				}
@@ -279,7 +299,7 @@ func (lhs *Handlers) worker() {
 	}
 }
 
-// getVisitor returns visitor data, including a rate limiter.
+// visitor returns visitor data, including a rate limiter.
 func (lim *limiter) visitor(id string) *visitor {
 	v, exists := lim.visitors[id]
 	if !exists {
