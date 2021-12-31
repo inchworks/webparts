@@ -67,6 +67,8 @@ type visitor struct {
 }
 
 // Allow checks the client's HTTP request rate against a limit. If rejected, it returns a suggested status code.
+// Use it to implement an HTTP request handler that does additional processing, or to limit rates on client errors.
+// If only rate limiting is needed, use ServeHTTP instead.
 func (lh *Handler) Allow(r *http.Request) (ok bool, status int) {
 
 	lim := lh.limit
@@ -84,8 +86,8 @@ func (lh *Handler) Allow(r *http.Request) (ok bool, status int) {
 	}
 
 	// limiter for this limit and visitor
-	v := lim.visitor(ip)
-	if v.rejects > lim.banAfter || !v.banTo.IsZero() || v.limiter.Allow() == false {
+	v := lim.visitor(ip, time.Time{})
+	if v.rejects > lim.banAfter || !v.banTo.IsZero() || (v.limiter != nil && v.limiter.Allow() == false) {
 
 		// count rejections and report first one
 		status = lh.reject(r, ip, v)
@@ -96,8 +98,11 @@ func (lh *Handler) Allow(r *http.Request) (ok bool, status int) {
 	return
 }
 
-// New returns a LimitHandler for a specified rate limit.
-// If called multiple times for the same limit, by justinas/alice for example, it will return the same item each time.
+// New returns a Handler for a specified rate limit.
+// If called multiple times for the same limit name, by justinas/alice for example, it will return the same item each time.
+// Specify alsoBan to extend a ban to other limits. Typically this might be a single escalating limiter that bans all requests.
+// If alsoBan specifies this limit (alsoBan==limit), the duration of a repeated ban will increase exponentially.
+// Note that escalating bans probably doesn't increase security but it serves to reduce the number of log entries for miscreants.
 func (lhs *Handlers) New(limit string, every time.Duration, burst int, banAfter int, alsoBan string, next http.Handler) *Handler {
 
 	lim := lhs.limiters[limit]
@@ -107,6 +112,28 @@ func (lhs *Handlers) New(limit string, every time.Duration, burst int, banAfter 
 			rate:     rate.Every(every),
 			burst:    burst,
 			banAfter: banAfter,
+			alsoBan:  strings.Split(alsoBan, ","),
+			visitors: make(map[string]*visitor),
+		}
+		lhs.limiters[limit] = lim
+	}
+	return &Handler{
+		limit:   lim,
+		banned:  http.HandlerFunc(defaultBannedHandler),
+		failure: http.HandlerFunc(defaultFailureHandler),
+		report:  defaultReportHandler,
+		success: next,
+	}
+}
+
+// NewExtended returns a Handler with no rate limit. Its purpose is to implement an extended ban on a wider set of events.
+// If alsoBan specifies this limit (alsoBan==limit), the duration of a repeated ban will increase exponentially.
+func (lhs *Handlers) NewUnlimited(limit string, alsoBan string, next http.Handler) *Handler {
+
+	lim := lhs.limiters[limit]
+	if lim == nil {
+		lim = &limiter{
+			lhs:      lhs,
 			alsoBan:  strings.Split(alsoBan, ","),
 			visitors: make(map[string]*visitor),
 		}
@@ -190,19 +217,20 @@ func (lhs *Handlers) Stop() {
 // ban blocks a misbehaving visitor
 func (lim *limiter) ban(r *http.Request, ip string, v *visitor) {
 
-	// escalate the ban following previous bans
-	v.banLevel++
-	v.banTo = time.Now().Add(lim.lhs.banFor << (v.banLevel * escalate))
+	// time when ban will end
+	v.banTo = time.Now().Add(lim.lhs.banFor)
 
-	// extend ban to other limits
 	for _, l := range lim.alsoBan {
 		lim1 := lim.lhs.limiters[l]
 
-		if lim1 != nil {
-			v1 := lim1.visitor(ip)
-			v1.banTo = v.banTo
-			v1.banLevel = v.banLevel
-			v1.rejects = 0
+		if lim1 == lim {
+			// escalate the ban following previous bans
+			v.banTo = time.Now().Add(lim.lhs.banFor << (v.banLevel * escalate))
+			v.banLevel++
+
+		} else if lim1 != nil {
+			// extend ban to another limit
+			lim1.visitor(ip, v.banTo)
 		}
 	}
 }
@@ -217,7 +245,7 @@ func defaultFailureHandler(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 }
 
-// defaultReportHandler is a null handler for rejections.
+// defaultReportHandler is a null handler to report rejections.
 func defaultReportHandler(*http.Request, string, string) {}
 
 // defaultVisitorAddr returns the IP address of a visitor, from Request.RemoteAddr.
@@ -228,6 +256,7 @@ func defaultVisitorAddr(r *http.Request) string {
 }
 
 // reject records a rate rejection for a visitor, and returns a status for reporting.
+// Note that in reporting we distinguish between extended bans, called "banned", and single limit bans, called "blocked".
 func (lh *Handler) reject(r *http.Request, ip string, v *visitor) int {
 
 	lim := lh.limit
@@ -235,20 +264,23 @@ func (lh *Handler) reject(r *http.Request, ip string, v *visitor) int {
 	// count rejections
 	v.rejects++
 
-	// check for added ban first, because the limit could be 1
 	if !v.banTo.IsZero() {
+	
+		// already banned
 		if v.rejects == 1 {
-			lh.report(r, ip, "also banned")
+
+			// start of extended ban, with possible escalation
+			lim.ban(r, ip, v)
+			lh.report(r, ip, fmt.Sprint("banned at level ", v.banLevel))
 		}
 		return http.StatusForbidden
 	}
 
-	// next check for first ban
 	if v.rejects == lim.banAfter {
 
-		// ban threshold reached for first time
+		// threshold reached for first time
 		lim.ban(r, ip, v)
-		lh.report(r, ip, fmt.Sprint("banned at level ", v.banLevel))
+		lh.report(r, ip, fmt.Sprint("blocked at level ", v.banLevel))
 		return http.StatusForbidden
 
 	} else if v.rejects == 1 {
@@ -256,7 +288,35 @@ func (lh *Handler) reject(r *http.Request, ip string, v *visitor) int {
 		// limit reached for first time
 		lh.report(r, ip, "rejected")
 	}
+
 	return http.StatusTooManyRequests
+}
+
+// visitor returns visitor data, including a rate limiter.
+func (lim *limiter) visitor(id string, banTo time.Time) *visitor {
+	v, exists := lim.visitors[id]
+	if !exists {
+
+		// rate limiter for new visitor
+		if lim.rate != 0 {
+			limiter := rate.NewLimiter(lim.rate, lim.burst)
+			v = &visitor{limiter: limiter, lastSeen: time.Now()}
+		} else {
+			v = &visitor{lastSeen: time.Now()}
+		}
+		lim.visitors[id] = v
+
+	} else {
+		// last seen time for the visitor
+		v.lastSeen = time.Now()
+	}
+
+	// add or extend ban
+	if banTo.After(v.banTo) {
+		v.banTo = banTo
+	}
+
+	return v
 }
 
 // worker goroutine checks the maps for visitors that can be un-banned or forgotten.
@@ -278,7 +338,7 @@ func (lhs *Handlers) worker() {
 						}
 
 					} else if v.banTo.IsZero() {
-						// remember bad visitors for longer - twice their last ban
+						// remember bad visitors for longer - twice their next ban
 						forget := lhs.banFor << (v.banLevel*escalate + 1)
 						if time.Since(v.lastSeen) > forget {
 							delete(lim.visitors, id)
@@ -297,21 +357,4 @@ func (lhs *Handlers) worker() {
 			return
 		}
 	}
-}
-
-// visitor returns visitor data, including a rate limiter.
-func (lim *limiter) visitor(id string) *visitor {
-	v, exists := lim.visitors[id]
-	if !exists {
-
-		// rate limiter for new visitor
-		limiter := rate.NewLimiter(lim.rate, lim.burst)
-		v = &visitor{limiter: limiter, lastSeen: time.Now()}
-		lim.visitors[id] = v
-
-	} else {
-		// last seen time for the visitor
-		v.lastSeen = time.Now()
-	}
-	return v
 }
