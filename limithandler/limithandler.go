@@ -103,6 +103,7 @@ func (lh *Handler) Allow(r *http.Request) (ok bool, status int) {
 // Specify alsoBan to extend a ban to other limits. Typically this might be a single escalating limiter that bans all requests.
 // If alsoBan specifies this limit (alsoBan==limit), the duration of a repeated ban will increase exponentially.
 // Note that escalating bans probably doesn't increase security but it serves to reduce the number of log entries for miscreants.
+// The parameter next may be nil if Allow() and not ServeHTTP() is to be called.
 func (lhs *Handlers) New(limit string, every time.Duration, burst int, banAfter int, alsoBan string, next http.Handler) *Handler {
 
 	lim := lhs.limiters[limit]
@@ -126,7 +127,7 @@ func (lhs *Handlers) New(limit string, every time.Duration, burst int, banAfter 
 	}
 }
 
-// NewExtended returns a Handler with no rate limit. Its purpose is to implement an extended ban on a wider set of events.
+// NewUnlimited returns a Handler with no rate limit. Its purpose is to implement an extended ban on a wider set of events.
 // If alsoBan specifies this limit (alsoBan==limit), the duration of a repeated ban will increase exponentially.
 func (lhs *Handlers) NewUnlimited(limit string, alsoBan string, next http.Handler) *Handler {
 
@@ -179,7 +180,12 @@ func (lh *Handler) SetReportHandler(handler func(r *http.Request, ip string, sta
 	lh.report = handler
 }
 
-// SetVisitorAddr specifies a function for reporting activity to the application.
+// SetVisitorAddr specifies a function to extract a visitor's IP address from a request.
+// The default is to use Request.RemoteAddr.
+// Alternatives of "x-real-ip" or "x-forwarded-for" from the Request.Header are needed if the server is behind a load balancer or other proxy.
+// (Take care - clients can spoof request headers, so use information only from trusted proxies.
+// See https://stackoverflow.com/questions/3003145/how-to-get-the-client-ip-address-in-php/55790#55790.)
+
 func (lhs *Handlers) SetVisitorAddr(fn func(*http.Request) string) {
 	lhs.visitorAddr = fn
 }
@@ -249,8 +255,6 @@ func defaultFailureHandler(w http.ResponseWriter, r *http.Request) {
 func defaultReportHandler(*http.Request, string, string) {}
 
 // defaultVisitorAddr returns the IP address of a visitor, from Request.RemoteAddr.
-// Alternatives of "x-real-ip" or "x-forwarded-for" from the Request.Header are needed if the server is behind a load balancer or other proxy.
-// Take care - clients can spoof x-forwarded-for when there is no proxy server.
 func defaultVisitorAddr(r *http.Request) string {
 	return r.RemoteAddr
 }

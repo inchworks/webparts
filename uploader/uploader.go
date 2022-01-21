@@ -229,7 +229,7 @@ func (up *Uploader) Begin() (string, error) {
 	return etx.String(id), nil
 }
 
-// NameFrommFile returns the owner ID, media file name and revision from a file name.
+// NameFromFile returns the owner ID, media file name and revision from a file name.
 // If the revision is 0, the owner is the request, otherwise the owner is a parent object.
 func NameFromFile(fileName string) (string, string, int) {
 	if len(fileName) > 0 {
@@ -550,7 +550,7 @@ func Thumbnail(filename string) string {
 
 	default:
 		// replace file extension
-		tn := strings.TrimSuffix(filename, filepath.Ext(filename)) + ".jpg"
+		tn := changeExt(filename, ".jpg")
 		return "S" + tn[1:]
 	}
 }
@@ -595,6 +595,12 @@ func getType(name string, videoTypes []string) (mediaType int, ext string, chang
 	return
 }
 
+// changeExt returns a file name with the specified extension.
+func changeExt(name string, ext string) string {
+	return strings.TrimSuffix(name, filepath.Ext(name)) + ext
+
+}
+
 // changeType normalises a media file extension, and indicates if it should be converted to a displayable type.
 // A blank name is returned for an unsupported format.
 func changeType(name string, videoTypes []string) (nm string, changed bool) {
@@ -602,7 +608,7 @@ func changeType(name string, videoTypes []string) (nm string, changed bool) {
 	var ext string
 
 	if mt, ext, changed = getType(name, videoTypes); mt != 0 {
-		nm = strings.TrimSuffix(name, filepath.Ext(name)) + ext
+		nm = changeExt(name, ext)
 	}
 	return
 }
@@ -644,6 +650,12 @@ func (up *Uploader) globVersions(pattern string) map[string]fileVersion {
 		fileName := filepath.Base(newFile)
 		_, name, rev := NameFromFile(fileName)
 
+		// normalise name (earlier implementations stored .jpeg as well as .jpg)
+		name = strings.ToLower(name)
+		if filepath.Ext(name) == ".jpeg" {
+			name = changeExt(name, ".jpg")
+		}
+	
 		// index case-blind
 		versions[strings.ToLower(name)] = fileVersion{
 			fileName: fileName,
@@ -681,14 +693,28 @@ func (up *Uploader) opDone(tx etx.TxId) {
 }
 
 // removeMedia unlinks an image file and the corresponding thumbnail.
-// (If this is the sole link, the file is deleted)
+// (If this is the sole link, the file is deleted.)
 func (up *Uploader) removeMedia(fileName string) error {
+	nm := fileName
+
+	// remove file
+	err := os.Remove(filepath.Join(up.FilePath, nm))
+	if err != nil && errors.Is(err, fs.ErrNotExist) {
+
+		// Is it a legacy file saved by an earlier implementation?
+		if filepath.Ext(nm) == ".jpg" {
+			fileName = changeExt(nm, ".jpeg")
+			err = os.Remove(filepath.Join(up.FilePath, nm))
+		}
+	}
 
 	// To make the operation idempotent, we accept that a file may already be deleted.
-	if err := os.Remove(filepath.Join(up.FilePath, fileName)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if err := os.Remove(filepath.Join(up.FilePath, Thumbnail(fileName))); err != nil && !errors.Is(err, fs.ErrNotExist) {
+
+	// remove corresponding thumbnail
+	if err := os.Remove(filepath.Join(up.FilePath, Thumbnail(nm))); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return nil
