@@ -243,11 +243,11 @@ func (lim *limiter) ban(ip string, v *visitor) {
 		}
 	}
 
-	// time when ban will end
+	// time when ban will end, with escalation
 	if v.banLevel == -1 {
 		v.banLevel = 0
 	}
-	v.banTo = time.Now().Add(lim.lhs.banFor << v.banLevel)
+	v.banTo = time.Now().Add(lim.lhs.banFor << (v.banLevel*escalate))
 }
 
 // defaultBannedHandler calls an HTTP error for a banned IP address.
@@ -358,8 +358,8 @@ func (lhs *Handlers) worker() {
 						}
 
 					} else if v.banTo.IsZero() {
-						// remember bad visitors for longer - twice their next ban
-						forget := lhs.banFor << (v.banLevel*escalate + 1)
+						// remember bad visitors for longer
+						forget := lhs.forget << ((v.banLevel+1)*escalate)
 						if time.Since(v.lastSeen) > forget {
 							delete(lim.visitors, id)
 						}
