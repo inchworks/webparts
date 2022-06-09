@@ -62,7 +62,7 @@ func (gb *GeoBlocker) GeoBlock(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 		var blocked bool
-		var loc, reg string
+		var ctry, reg string
 		var ip net.IP
 
 		// lock database against reload
@@ -92,9 +92,9 @@ func (gb *GeoBlocker) GeoBlock(next http.Handler) http.Handler {
 				if err != nil && gb.ErrorLog != nil {
 					gb.ErrorLog.Print("Geo-location lookup:", err)
 				} else {
-					loc = geo.Country.ISOCode
+					ctry = geo.Country.ISOCode
 					reg = geo.RegisteredCountry.ISOCode
-					listed := gb.listed[loc] || gb.listed[reg]
+					listed := gb.listed[ctry] || gb.listed[reg]
 					blocked = (listed == !gb.Allow) // blacklist or whitelist?
 				}
 			}
@@ -105,6 +105,7 @@ func (gb *GeoBlocker) GeoBlock(next http.Handler) http.Handler {
 
 		if blocked {
 			var msg string
+			loc := location(reg, ctry)
 
 			// report blocking
 			if gb.Reporter != nil {
@@ -119,7 +120,7 @@ func (gb *GeoBlocker) GeoBlock(next http.Handler) http.Handler {
 			http.Error(w, msg, http.StatusForbidden)
 		} else {
 			// save location for threat reporting
-			ctx := context.WithValue(r.Context(), contextKeyCountry, loc)
+			ctx := context.WithValue(r.Context(), contextKeyCountry, ctry)
 			ctx = context.WithValue(ctx, contextKeyRegistered, reg)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -135,14 +136,8 @@ func Country(r *http.Request) string {
 
 // Location returns both the registered and location country codes for the current request, if they are different.
 func Location(r *http.Request) string {
-	loc := r.Context().Value(contextKeyCountry).(string)
-	reg := r.Context().Value(contextKeyRegistered).(string)
-
-	if loc == reg {
-		return loc
-	} else {
-		return reg + ">" +loc
-	}
+	ctx := r.Context()
+	return location(ctx.Value(contextKeyRegistered).(string),  ctx.Value(contextKeyCountry).(string))
 }
 
 // Registered returns the registered country codes for the current request.
@@ -155,6 +150,16 @@ func (gb *GeoBlocker) Stop() {
 
 	// terminate the reloader, which closes the database
 	close(gb.chDone)
+}
+
+// location returns both the registered and country codes for the current request, if they are different.
+func location(reg string, ctry string) string {
+
+	if reg == ctry {
+		return reg
+	} else {
+		return reg + ">" + ctry
+	}
 }
 
 // reloadGeoDB closes the geo-location database and reopens the latest one.
