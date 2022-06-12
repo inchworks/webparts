@@ -79,6 +79,7 @@ import (
 const (
 	MediaImage = 1
 	MediaVideo = 2
+	MediaAudio = 3
 )
 
 // op holds the state of uploading media for a single transaction
@@ -98,8 +99,10 @@ type Uploader struct {
 	ThumbH       int
 	MaxAge       time.Duration // maximum time for a parent update
 	SnapshotAt   time.Duration // snapshot time in video (-ve for none)
+	AudioTypes   []string
 	VideoPackage string        // software for video processing: ffmpeg, or a docker-hosted implementation of ffmpeg, for debugging
 	VideoTypes   []string
+
 
 	// components
 	errorLog *log.Logger
@@ -269,6 +272,7 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId) (err error, byCl
 	ft := up.MediaType(name)
 
 	switch ft {
+
 	case MediaImage:
 		// duplicate file in buffer, since we can only read it from the header once
 		tee := io.TeeReader(file, &buffered)
@@ -279,7 +283,7 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId) (err error, byCl
 			return err, true // this is a bad image from client
 		}
 
-	case MediaVideo:
+	case MediaAudio, MediaVideo:
 		if _, err := io.Copy(&buffered, file); err != nil {
 			return err, false // don't know why this might fail
 		}
@@ -362,7 +366,7 @@ func FileFromName(id etx.TxId, name string) string {
 // MediaType returns the media type. It is 0 if not accepted.
 func (up *Uploader) MediaType(name string) int {
 
-	mt, _, _ := getType(name, up.VideoTypes)
+	mt, _, _ := getType(name, up.AudioTypes, up.VideoTypes)
 	return mt
 }
 
@@ -474,7 +478,7 @@ func (b *Bind) File(fileName string) (string, error) {
 	_, name, rev := NameFromFile(fileName)
 
 	// change user's file type, to match converted media
-	name, _ = changeType(name, up.VideoTypes)
+	name, _ = changeType(name, up.AudioTypes, up.VideoTypes)
 	lc := strings.ToLower(name)
 
 	// current version
@@ -559,7 +563,7 @@ func Thumbnail(filename string) string {
 
 // getType returns the mediaType and normalised file extension, and indicates if it is converted.
 // A blank name is returned for an unsupported format.
-func getType(name string, videoTypes []string) (mediaType int, ext string, changed bool) {
+func getType(name string, audioTypes []string, videoTypes []string) (mediaType int, ext string, changed bool) {
 
 	if fmt, err := imaging.FormatFromFilename(name); err == nil {
 		// image formats
@@ -580,8 +584,18 @@ func getType(name string, videoTypes []string) (mediaType int, ext string, chang
 			changed = true
 		}
 	} else {
-		// acceptable video formats, all converted to MP4
 		t := strings.ToLower(filepath.Ext(name))
+
+		// acceptable audio formats
+		for _, vt := range audioTypes {
+			if t == vt {
+				mediaType = MediaAudio
+				ext = t
+				break
+			}
+		}
+
+		// acceptable video formats, all converted to MP4
 		for _, vt := range videoTypes {
 			if t == vt {
 				mediaType = MediaVideo
@@ -598,16 +612,15 @@ func getType(name string, videoTypes []string) (mediaType int, ext string, chang
 // changeExt returns a file name with the specified extension.
 func changeExt(name string, ext string) string {
 	return strings.TrimSuffix(name, filepath.Ext(name)) + ext
-
 }
 
 // changeType normalises a media file extension, and indicates if it should be converted to a displayable type.
 // A blank name is returned for an unsupported format.
-func changeType(name string, videoTypes []string) (nm string, changed bool) {
+func changeType(name string, audioTypes []string, videoTypes []string) (nm string, changed bool) {
 	var mt int
 	var ext string
 
-	if mt, ext, changed = getType(name, videoTypes); mt != 0 {
+	if mt, ext, changed = getType(name, audioTypes, videoTypes); mt != 0 {
 		nm = changeExt(name, ext)
 	}
 	return
@@ -703,7 +716,7 @@ func (up *Uploader) removeMedia(fileName string) error {
 
 		// Is it a legacy file saved by an earlier implementation?
 		if filepath.Ext(nm) == ".jpg" {
-			fileName = changeExt(nm, ".jpeg")
+			nm = changeExt(nm, ".jpeg")
 			err = os.Remove(filepath.Join(up.FilePath, nm))
 		}
 	}
@@ -740,11 +753,41 @@ func (up *Uploader) removeOrphans(id etx.TxId) error {
 	return up.tm.End(id)
 }
 
+// saveAudio saves the audio file and a dummy thumbnail.
+// It returns true if no format conversion is needed.
+// (No conversions are implemented in this version.)
+func (up *Uploader) saveAudio(req reqSave) (bool, error) {
+
+	// normalise file name
+	name, _ := changeType(req.name, up.AudioTypes, []string{})
+
+	// path for saved file
+	fn := FileFromName(req.tx, name)
+	path := filepath.Join(up.FilePath, fn)
+
+	// save uploaded audio file
+	audio, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0666)
+	if err != nil {
+		return true, err // could be a bad name?
+	}
+	_, err = io.Copy(audio, &req.fullsize)
+	audio.Close()
+	if err != nil {
+		return true, err
+	}
+
+	// add a dummy thumbnail
+	err = copyStatic(up.FilePath, Thumbnail(fn), WebFiles, "web/static/audio.png")
+
+	return true, err
+}
+
+
 // saveImage completes image saving, converting and resizing as needed.
 func (up *Uploader) saveImage(req reqSave) error {
 
 	// convert non-displayable file types to JPG
-	name, convert := changeType(req.name, []string{})
+	name, convert := changeType(req.name, []string{}, []string{})
 
 	// path for saved files
 	filename := FileFromName(req.tx, name)
@@ -786,15 +829,21 @@ func (up *Uploader) saveImage(req reqSave) error {
 
 // saveMedia performs image or video processing, called from background worker.
 func (up *Uploader) saveMedia(req reqSave) error {
+	var done bool
 	var err error
 
 	switch req.mediaType {
+	case MediaAudio:
+		done, err = up.saveAudio(req)
+		if done {
+			up.opDone(req.tx)
+		}
+
 	case MediaImage:
 		err = up.saveImage(req)
 		up.opDone(req.tx)
 
 	case MediaVideo:
-		var done bool
 		done, err = up.saveVideo(req)
 		if done {
 			up.opDone(req.tx)
