@@ -104,7 +104,7 @@ func (up *Uploader) saveSnapshot(videoName string) error {
 func (up *Uploader) saveVideo(req reqSave) (bool, error) {
 
 	// convert non-displable file types to MP3
-	name, convert := changeType(req.name, up.VideoTypes)
+	name, convert := changeType(req.name, []string{}, up.VideoTypes)
 	if convert {
 		name = req.name // keep orginal name for files to be converted
 	}
