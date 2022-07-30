@@ -25,3 +25,6 @@ Please open issues to discuss new features.
 Go Packages
 - [disintegration/imaging](https://github.com/disintegration/imaging) Image processing.
 - [golangcollege/sessions](https://github.com/golangcollege/sessions) HTTP session cookies.
+
+Other
+- [Speaker_Icon.svg](https://commons.wikimedia.org/wiki/File:Speaker_Icon.svg) Icon for audio files.

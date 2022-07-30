@@ -43,6 +43,7 @@ type Monitor struct {
 // Init starts the monitor. It returns function to be called to stop the monitor.
 func (m *Monitor) Init() func() {
 
+	m.clients = make([]Monitored, 0)
 	m.names = make(map[string]int)
 
 	// monitoring periods
