@@ -28,6 +28,7 @@ type GeoBlocker struct {
 	Allow    bool // permit only specified countries, instead of blocking them
 	ErrorLog *log.Logger
 	Reporter func(r *http.Request, location string, ip net.IP) string
+	ReportSingle bool // report just location or registered country, not both
 	Store    string // storage location for database
 
 	file   string          // source file for database
@@ -104,8 +105,18 @@ func (gb *GeoBlocker) GeoBlock(next http.Handler) http.Handler {
 		gb.mutex.RUnlock()
 
 		if blocked {
-			var msg string
-			loc := location(reg, ctry)
+			var loc, msg string
+			if gb.ReportSingle {
+				// simplify stats by showing just the location that caused blocking
+				// (and show country if not whitelisted)
+				if gb.listed[reg] {
+					loc = reg
+				} else {
+					loc = ctry
+				}
+			} else {
+				loc = location(reg, ctry)
+			}
 
 			// report blocking
 			if gb.Reporter != nil {
