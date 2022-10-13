@@ -27,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -339,51 +338,6 @@ func (f *Form) PermittedValues(field string, opts ...string) {
 // Valid returns true the form data has no errors.
 func (f *Form) Valid() bool {
 	return len(f.Errors)+len(f.ChildErrors) == 0
-}
-
-// parseFormCollection processes a set of fields with names like "type[n]field".
-//
-// From https://stackoverflow.com/questions/34839811/how-to-retrieve-form-data-as-array
-func pArseFormCollection(r *http.Request, typeName string) []map[string]string {
-
-	// ## Never used! Repacks into another map, and still need to process that. Might be useful for complex fields.
-
-	var result []map[string]string
-	r.ParseForm()
-	for key, values := range r.Form {
-		re := regexp.MustCompile(typeName + "\\[([0-9]+)\\]\\[([a-zA-Z]+)\\]")
-		matches := re.FindStringSubmatch(key)
-
-		if len(matches) >= 3 {
-
-			index, _ := strconv.Atoi(matches[1])
-
-			for index >= len(result) {
-				result = append(result, map[string]string{})
-			}
-
-			result[index][matches[2]] = values[0]
-		}
-	}
-	return result
-}
-
-// parseFormHandler processes field names like "type.field".
-func parseFormHandler(writer http.ResponseWriter, request *http.Request) {
-
-	// ## Also never used! Still creates key/value pairs.
-
-	request.ParseForm()
-
-	userParams := make(map[string]string)
-
-	for key := range request.Form {
-		if strings.HasPrefix(key, "contact.") {
-			userParams[string(key[8:])] = request.Form.Get(key)
-		}
-	}
-
-	fmt.Fprintf(writer, "%#v\n", userParams)
 }
 
 // ChildError returns the error for a child field
