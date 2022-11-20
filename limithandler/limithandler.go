@@ -27,11 +27,12 @@ type Handler struct {
 	limit *limiter
 
 	// handlers wrapped
-	banned  http.Handler
-	failure http.Handler
-	report  func(*http.Request, string, string)
+	banned    http.Handler
+	failure   http.Handler
+	ignored   http.Handler
+	report    func(*http.Request, string, string)
 	reportAll bool
-	success http.Handler
+	success   http.Handler
 }
 
 type Handlers struct {
@@ -56,6 +57,7 @@ type limiter struct {
 	// internal data
 	mu       sync.Mutex
 	visitors map[string]*visitor
+	rejects  int		// rejected requests (statistic)
 }
 
 // rate limiter for each visitor
@@ -124,6 +126,7 @@ func (lhs *Handlers) New(limit string, every time.Duration, burst int, banAfter 
 		limit:   lim,
 		banned:  http.HandlerFunc(defaultBannedHandler),
 		failure: http.HandlerFunc(defaultFailureHandler),
+		ignored: http.HandlerFunc(defaultIgnoredHandler),
 		success: next,
 	}
 }
@@ -149,6 +152,18 @@ func (lhs *Handlers) NewUnlimited(limit string, alsoBan string, next http.Handle
 	}
 }
 
+// RejectsCounted returns a statistic of the total number of requests rejected, and resets the count.
+func (lhs *Handlers) RejectsCounted() (rejects int) {
+
+	for _, lim := range lhs.limiters {
+		lim.mu.Lock()
+		rejects += lim.rejects
+		lim.rejects = 0
+		lim.mu.Unlock()
+	}
+	return
+}
+
 // ServeHTTP implements an HTTP request handler to checks a client's request rate.
 // If the rate is acceptable, the specified next handler is caller.
 func (lh *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -157,22 +172,39 @@ func (lh *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if ok {
 		lh.success.ServeHTTP(w, r)
 
-	} else if status == http.StatusForbidden {
-		lh.banned.ServeHTTP(w, r) // banned
-
 	} else {
-		lh.failure.ServeHTTP(w, r) // limit exceeded
+		switch status {
+		case http.StatusForbidden:
+			lh.banned.ServeHTTP(w, r) // newly banned
+
+		case http.StatusNotFound:
+			lh.ignored.ServeHTTP(w, r) // banned and ignored
+
+		case http.StatusTooManyRequests:
+			fallthrough
+
+		default:
+			lh.failure.ServeHTTP(w, r) // limit exceeded
+		}
 	}
 }
 
 // SetBannedHandler specifies a function to be called when requester has been banned.
+// (Deprecated in favour of SetBanHandlers.)
 func (lh *Handler) SetBannedHandler(handler http.Handler) {
 	lh.banned = handler
+	lh.ignored = handler
 }
 
 // SetFailureHandler specifies a function to be called when the rate limit is exceeded.
 func (lh *Handler) SetFailureHandler(handler http.Handler) {
 	lh.failure = handler
+}
+
+// SetBanHandlers specifies functions to be called when requester is first banned, and on subsequent requests.
+func (lh *Handler) SetBanHandlers(banned, ignored http.Handler) {
+	lh.banned = banned
+	lh.ignored = ignored
 }
 
 // SetReportHandler specifies a function for reporting significant activity to the application.
@@ -247,10 +279,10 @@ func (lim *limiter) ban(ip string, v *visitor) {
 	if v.banLevel == -1 {
 		v.banLevel = 0
 	}
-	v.banTo = time.Now().Add(lim.lhs.banFor << (v.banLevel*escalate))
+	v.banTo = time.Now().Add(lim.lhs.banFor << (v.banLevel * escalate))
 }
 
-// defaultBannedHandler calls an HTTP error for a banned IP address.
+// defaultBannedHandler calls an HTTP error for a newly banned IP address.
 func defaultBannedHandler(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Banned for suspected intrusion attempt", http.StatusForbidden)
 }
@@ -258,6 +290,13 @@ func defaultBannedHandler(w http.ResponseWriter, r *http.Request) {
 // defaultFailureHandler calls an HTTP error for limit failures.
 func defaultFailureHandler(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+}
+
+// defaultIgnoredHandler calls an HTTP error for an already banned IP address.
+func defaultIgnoredHandler(w http.ResponseWriter, r *http.Request) {
+
+	// trying a different strategy in the faint hope that idiot bots might give up sooner
+	http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 }
 
 // defaultVisitorAddr returns the IP address of a visitor, from Request.RemoteAddr.
@@ -269,12 +308,13 @@ func defaultVisitorAddr(r *http.Request) string {
 // Note that in reporting we distinguish between extended bans, called "banned", and single limit bans, called "blocked".
 func (lh *Handler) reject(r *http.Request, ip string, v *visitor) int {
 
-	var httpStatus = http.StatusTooManyRequests
+	var httpStatus int
 	var limitStatus string
 	lim := lh.limit
 
 	// count rejections
 	v.rejects++
+	lim.rejects++
 
 	if v.reject {
 
@@ -292,10 +332,10 @@ func (lh *Handler) reject(r *http.Request, ip string, v *visitor) int {
 		httpStatus = http.StatusForbidden
 
 	} else if v.rejects > lim.banAfter {
-		
-		// already banned
-		httpStatus = http.StatusForbidden
-	
+
+		// already banned - send a less helpful response
+		httpStatus = http.StatusNotFound
+
 	} else if v.rejects == 1 {
 
 		// rate limit reached for first time
@@ -312,7 +352,7 @@ func (lh *Handler) reject(r *http.Request, ip string, v *visitor) int {
 		if limitStatus != "" || lh.reportAll {
 			lh.report(r, ip, limitStatus)
 		}
-	} 
+	}
 
 	return httpStatus
 }
@@ -359,7 +399,7 @@ func (lhs *Handlers) worker() {
 
 					} else if v.banTo.IsZero() {
 						// remember bad visitors for longer
-						forget := lhs.forget << ((v.banLevel+1)*escalate)
+						forget := lhs.forget << ((v.banLevel + 1) * escalate)
 						if time.Since(v.lastSeen) > forget {
 							delete(lim.visitors, id)
 						}

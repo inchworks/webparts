@@ -25,11 +25,11 @@ const contextKeyRegistered = contextKey(1)
 
 // GeoBlocker holds the parameters and state for geo-blocking. Typically only one is needed.
 type GeoBlocker struct {
-	Allow    bool // permit only specified countries, instead of blocking them
-	ErrorLog *log.Logger
-	Reporter func(r *http.Request, location string, ip net.IP) string
-	ReportSingle bool // report just location or registered country, not both
-	Store    string // storage location for database
+	Allow        bool // permit only specified countries, instead of blocking them
+	ErrorLog     *log.Logger
+	Reporter     func(r *http.Request, location string, ip net.IP) string
+	ReportSingle bool   // report just location or registered country, not both
+	Store        string // storage location for database
 
 	file   string          // source file for database
 	listed map[string]bool // specified countries
@@ -125,7 +125,7 @@ func (gb *GeoBlocker) GeoBlock(next http.Handler) http.Handler {
 
 			// default message
 			if msg == "" {
-				msg = "Access from "+loc+" not allowed"
+				msg = "Access from " + loc + " not allowed"
 			}
 
 			http.Error(w, msg, http.StatusForbidden)
@@ -148,7 +148,7 @@ func Country(r *http.Request) string {
 // Location returns both the registered and location country codes for the current request, if they are different.
 func Location(r *http.Request) string {
 	ctx := r.Context()
-	return location(ctx.Value(contextKeyRegistered).(string),  ctx.Value(contextKeyCountry).(string))
+	return location(ctx.Value(contextKeyRegistered).(string), ctx.Value(contextKeyCountry).(string))
 }
 
 // Registered returns the registered country codes for the current request.
