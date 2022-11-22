@@ -148,6 +148,7 @@ func (lhs *Handlers) NewUnlimited(limit string, alsoBan string, next http.Handle
 		limit:   lim,
 		banned:  http.HandlerFunc(defaultBannedHandler),
 		failure: http.HandlerFunc(defaultFailureHandler),
+		ignored: http.HandlerFunc(defaultIgnoredHandler),
 		success: next,
 	}
 }

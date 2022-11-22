@@ -104,6 +104,10 @@ func (gb *GeoBlocker) GeoBlock(next http.Handler) http.Handler {
 		// finished with database
 		gb.mutex.RUnlock()
 
+		// save location for threat reporting
+		ctx := context.WithValue(r.Context(), contextKeyCountry, ctry)
+		ctx = context.WithValue(ctx, contextKeyRegistered, reg)
+		
 		if blocked {
 			var loc, msg string
 			if gb.ReportSingle {
@@ -130,9 +134,6 @@ func (gb *GeoBlocker) GeoBlock(next http.Handler) http.Handler {
 
 			http.Error(w, msg, http.StatusForbidden)
 		} else {
-			// save location for threat reporting
-			ctx := context.WithValue(r.Context(), contextKeyCountry, ctry)
-			ctx = context.WithValue(ctx, contextKeyRegistered, reg)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
@@ -141,19 +142,26 @@ func (gb *GeoBlocker) GeoBlock(next http.Handler) http.Handler {
 }
 
 // Country returns the location country code for the current request.
-func Country(r *http.Request) string {
-	return r.Context().Value(contextKeyCountry).(string)
+func Country(r *http.Request) (loc string) {
+	v := r.Context().Value(contextKeyCountry)
+	if v != nil {
+		loc = v.(string)
+	}
+	return 
 }
 
 // Location returns both the registered and location country codes for the current request, if they are different.
 func Location(r *http.Request) string {
-	ctx := r.Context()
-	return location(ctx.Value(contextKeyRegistered).(string), ctx.Value(contextKeyCountry).(string))
+	return location(Country(r), Registered(r))
 }
 
 // Registered returns the registered country codes for the current request.
-func Registered(r *http.Request) string {
-	return r.Context().Value(contextKeyRegistered).(string)
+func Registered(r *http.Request) (loc string) {
+	v := r.Context().Value(contextKeyRegistered)
+	if v != nil {
+		loc = v.(string)
+	}
+	return 
 }
 
 // Stop ends geo-blocking.
