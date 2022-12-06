@@ -95,13 +95,3 @@ type Users struct {
 // WebFiles are the package's web resources (templates and static files)
 //go:embed web
 var WebFiles embed.FS
-
-// WebPath returns a path to the package's web resources, including template files, if accessible.
-//
-// They will not be available if running without source code. In this case the parent
-// must use a copy made during the application build.
-func WebPath() (string, error) {
-
-	// ## not needed with embedded file, left until quiz app changed
-	return "", nil
-}

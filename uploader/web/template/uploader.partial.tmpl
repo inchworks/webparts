@@ -1,0 +1,10 @@
+{{define "uploader"}}
+    <input type='hidden' class="mediaName" name='mediaName' value='{{.MediaName}}'>
+    <div class="input-group">
+        <span class='input-group-text upload-name'>{{.MediaName}}</span>
+        <label class='form-control upload-text {{.ChildValid "mediaName"}}' for='U{{ .ChildIndex }}' role='button'>{{ .Prompt }}</label>
+        <input class='upload-input d-none' type='file' id='U{{ .ChildIndex }}' accept='{{ .Accept }}'>
+        <label class='input-group-text upload-label' for='U{{ .ChildIndex }}' role='button'>Browse</label>
+        <div class='invalid-feedback bad-file'>{{ .ChildError "mediaName"}}</div>
+    </div>
+{{end}}

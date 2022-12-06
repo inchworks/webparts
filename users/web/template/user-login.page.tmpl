@@ -17,13 +17,13 @@
                 {{with .Errors.Get "generic"}}
                     <div class='alert alert-danger'>{{.}}</div>
                 {{end}}
-                <div class="form-group col-md-6">
-                    <label for='usr'>Username</label>
+                <div class="col-md-6 mb-3">
+                    <label class="form-label" for='usr'>Username</label>
                     <input type='email' class="form-control" id='usr' name='username' autocomplete='username' value='{{.Get "username"}}'>
                     <small class="form-text text-muted">Your email address.</small>
                 </div>
-                <div class="form-group col-md-6">
-                    <label for='pwd'>Password</label>
+                <div class="col-md-6 mb-3">
+                    <label class="form-label" for='pwd'>Password</label>
                     <input type='password' class="form-control" id='pwd' name='password' autocomplete='current-password'>
                 </div>
              {{end}}
