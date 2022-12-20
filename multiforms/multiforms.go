@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"math"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -131,6 +132,56 @@ func (f *Form) ChildFile(field string, i int, ix int, validType func(string) boo
 		f.ChildErrors.Add(field, ix, "File type not supported: ")
 	}
 	return value
+}
+
+// ChildFloat accepts a floating point number with a minimum  and maximum values from a child form.
+// The precision specifies the maximum precision accepted: 0 = any, 1 = whole number, 0.5 = half values, 0.1 = tenths, etc.
+// It allows blank values, and returns both the number and a tidily formatted string. 
+func (f *Form) ChildFloat(field string, i int, ix int, min float64, max float64, precision float64) (n float64, s string) {
+
+	// don't validate template, and accept blanks
+	if ix == -1 {
+		return
+	}
+
+	// accept blanks
+	s = f.Values[field][i]
+	if s == "" {
+		return
+	}
+
+	// parse field
+	var err error
+	n, err = strconv.ParseFloat(s, 64)
+	if err != nil {
+		f.ChildErrors.Add(field, ix, "Must be a number")
+		return
+	}
+
+	// reformat number
+	s = strconv.FormatFloat(n, 'f', -1, 64)
+
+	// limits
+	if n < min {
+		if min == 0 {
+			f.ChildErrors.Add(field, ix, "Must be positive")
+		} else {
+			f.ChildErrors.Add(field, ix, "Too small")
+		}
+
+	} else if n >= max {
+		f.ChildErrors.Add(field, ix, "Too large")
+	}
+
+	// limit precision
+	if precision > 0 {
+		_, frac := math.Modf(n / precision)
+		if frac > 0.0000001 {
+			f.ChildErrors.Add(field, ix, "Fraction < " + strconv.FormatFloat(precision, 'f', -1, 64))
+		}
+	}
+
+	return
 }
 
 // ChildMin returns a number with a minimum value from a child form.
