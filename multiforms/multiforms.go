@@ -1,10 +1,9 @@
 // Copyright © Rob Burke inchworks.com, 2020.
 
-// Package multiforms processing returned HTML forms that may contain child forms.
+// Package multiforms processes returned HTML forms that may contain child forms.
 //
 // Acknowledgement: the origin of this code is the book Let's Go! by Alex Edwards.
 // This version adds support for child forms.
-
 package multiforms
 
 // Well, this much more complex than I like.

@@ -1,12 +1,7 @@
 // Copyright © Rob Burke inchworks.com, 2021.
 
-package stack
-
-import (
-	"io/fs"
-)
-
-// StackFS provides a single file system from a stack of file systems.
+// Package stack implements a single file system, StackFS, from a stack of file systems.
+//
 // A file defined higher in the stack overrides any file of the same path and name lower in the stack.
 // Typically the top FS holds site customisation, the next lower FS holds embedded files
 // for application resources, with package resources at the bottom.
@@ -15,6 +10,12 @@ import (
 // The implementation assumes that all the FS, except for the top one, hold a modest number of files.
 // It also assumes that only the top FS may have files added after initialisation,
 // and removing a file will not uncover one in a lower FS.
+package stack
+
+import (
+	"io/fs"
+)
+
 type StackFS struct {
 	stacked map[string]fs.FS
 	top     fs.FS
