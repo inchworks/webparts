@@ -36,8 +36,9 @@ type GeoBlocker struct {
 	ReportSingle bool   // report just location or registered country, not both
 	Store        string // storage location for database
 
-	file   string          // source file for database
-	listed map[string]bool // specified countries
+	file    string          // source file for database
+	listed  map[string]bool // specified countries
+	rejects int             // rejected requests (statistic)
 
 	// geoBlocking database
 	mutex sync.RWMutex
@@ -106,6 +107,7 @@ func (gb *GeoBlocker) GeoBlock(next http.Handler) http.Handler {
 			if gb.Reporter != nil {
 				msg = gb.Reporter(r, loc, ip)
 			}
+			gb.rejects++ // statistic
 
 			// default message
 			if msg == "" {
@@ -183,13 +185,21 @@ func Registered(r *http.Request) (loc string) {
 	return
 }
 
+// RejectsCounted returns a statistic of the total number of requests rejected, and resets the count.
+func (gb *GeoBlocker) RejectsCounted() (rejects int) {
+
+	rejects = gb.rejects
+	gb.rejects = 0
+	return
+}
+
 // RemoteIP returns the originating IP address for the current request.
 func RemoteIP(r *http.Request) (ip string) {
 	v := r.Context().Value(contextKeyLocation)
 	if v != nil {
 		ip = v.(location).ip // cached
 	} else {
-		ip, _, _= net.SplitHostPort(r.RemoteAddr) // when Geo Block not used
+		ip, _, _ = net.SplitHostPort(r.RemoteAddr) // when Geo Block not used
 	}
 	return
 }
