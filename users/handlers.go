@@ -151,7 +151,10 @@ func (u *Users) PostFormEdit(w http.ResponseWriter, r *http.Request) {
 
 	// save changes
 	if tx := u.onEditUsers(users); tx != 0 {
-		u.TM.DoNext(tx)
+		if err := u.TM.Do(tx); err != nil {
+			u.clientError(w, http.StatusInternalServerError)
+			return
+		}
 		app.Flash(r, "User changes saved.")
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 

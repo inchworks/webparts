@@ -16,11 +16,10 @@
 //
 // uploader maintains consistency between the parent object and the media files it references, with these limitations:
 //
-// - Object saved before EndSave is completed : there is a brief period when new media files cannot be displayed.
-// ## Can I check?
+//   - Object saved before media Save request have completed : there is a brief period when new media files cannot be displayed.
 //
-// - After object saved, and before the bind operation, there is a brief period where it references new files and has deleted files removed,
-//  but still references the previous versions of updated files.
+//   - After object saved, and before the bind operation, there is a brief period where it references new files and has deleted files removed,
+//     but still references the previous versions of updated files.
 //
 // Use the uploader as follows:
 //
@@ -48,7 +47,7 @@
 // (6) After the parent update has been committed, call Bind.End.
 // Any existing files not listed by Bind will be deleted.
 //
-// When deleting an object, call StartBind (with no request code), delete the object and then call EndBind.
+// When deleting an object, call StartBind (with no request code), delete the object and then call Bind.End.
 //
 // Use Thumbnail to get the file name for a thumbnail image corresponding to a media file.
 package uploader
@@ -97,12 +96,13 @@ type Uploader struct {
 	MaxH         int
 	ThumbW       int
 	ThumbH       int
+	MaxOriginal  int           // maximum size to keep unprocessed image
 	MaxAge       time.Duration // maximum time for a parent update
 	SnapshotAt   time.Duration // snapshot time in video (-ve for none)
 	AudioTypes   []string
-	VideoPackage string        // software for video processing: ffmpeg, or a docker-hosted implementation of ffmpeg, for debugging
+	VideoPackage string // software for video processing: ffmpeg, or a docker-hosted implementation of ffmpeg, for debugging
+	VideoResolution int
 	VideoTypes   []string
-
 
 	// components
 	errorLog *log.Logger
@@ -113,7 +113,7 @@ type Uploader struct {
 	// background worker
 	chDone    chan bool
 	chSave    chan reqSave
-	chOrphans chan OpOrphans
+	chTemps chan OpTemps
 
 	// separate worker for video processing
 	chVideosDone chan bool
@@ -121,7 +121,7 @@ type Uploader struct {
 
 	// uploads in progress for each transaction
 	muUploads sync.Mutex
-	ops     map[etx.TxId]op
+	ops       map[etx.TxId]op
 }
 
 // Context for a sequence of bind calls.
@@ -133,16 +133,12 @@ type Bind struct {
 	delVersions []fileVersion
 }
 
-type OpOrphans struct {
-	tx etx.TxId
-}
-
 type reqSave struct {
-	name      string       // file name
-	tx        etx.TxId     // transaction ID, used to match media files with parent form
-	mediaType int          // image or video
-	fullsize  bytes.Buffer // original image or video
-	img       image.Image  // nil for video
+	name      string        // file name
+	tx        etx.TxId      // transaction ID, used to match media files with parent form
+	mediaType int           // image or video
+	fullsize  *bytes.Buffer // original image or video
+	img       image.Image   // nil for video
 }
 
 // DB is an interface to the database manager that handles parent transactions.
@@ -158,45 +154,67 @@ type fileVersion struct {
 }
 
 // WebFiles are the package's web resources (templates and static files)
+//
 //go:embed web
 var WebFiles embed.FS
 
-// Name, ForOperation and Operaion implement the RM interface for webparts.etx.
+// Name, ForOperation and Operation implement the RM interface for webparts.etx.
+
+// Operation types (must be non-zero)
+const (
+	OpAbort = iota + 1
+	OpCommit
+)
+
+type OpTemps struct {
+	tx etx.TxId
+	opType int
+}
 
 func (up *Uploader) Name() string {
 	return "webparts.uploader"
 }
 
 func (up *Uploader) ForOperation(opType int) etx.Op {
-	return &OpOrphans{}
+	// we only need one operation record
+	return &OpTemps{}
 }
 
 func (up *Uploader) Operation(id etx.TxId, opType int, op etx.Op) {
-
-	// this is the only operation we log
-	opO := op.(*OpOrphans)
-	opO.tx = id
+	
+	// this is the only operation record we log
+	opT := op.(*OpTemps)
+	opT.tx = id
+	opT.opType = opType
 
 	// remove files for abandoned transaction
-	up.chOrphans <- *opO
+	up.chTemps <- *opT
 }
 
 // Initialise starts the file uploader.
 func (up *Uploader) Initialise(log *log.Logger, db DB, tm *etx.TM) {
+
+	// default parameters
+	if up.MaxOriginal == 0 {
+		up.MaxOriginal = 3 * 1024 * 1024
+	}
+	if up.VideoResolution == 0 {
+		up.VideoResolution = 1080
+	}
 
 	up.errorLog = log
 	up.db = db
 	up.tm = tm
 	up.chDone = make(chan bool, 1)
 	up.chSave = make(chan reqSave, 20)
-	up.chOrphans = make(chan OpOrphans, 4)
+	up.chTemps = make(chan OpTemps, 4)
 	up.ops = make(map[etx.TxId]op, 8)
 
 	up.chVideosDone = make(chan bool, 1)
 
 	// start background worker
 	up.tick = time.NewTicker(up.MaxAge / 8)
-	go up.worker(up.chSave, up.chOrphans, up.tick.C, up.chDone)
+	go up.worker(up.chSave, up.chTemps, up.tick.C, up.chDone)
 
 	// separate worker for video processing
 	if up.VideoPackage != "" {
@@ -225,7 +243,7 @@ func (up *Uploader) Begin() (string, error) {
 	id := up.tm.Begin()
 
 	// add operation to remove orphan files, if the update is abandoned
-	if err := up.tm.SetNext(id, up, 0, &OpOrphans{}); err != nil {
+	if _, err := up.tm.AddNext(id, up, 0, &OpTemps{}); err != nil {
 		return "", err
 	}
 
@@ -263,29 +281,55 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId) (err error, byCl
 	}
 	defer file.Close()
 
-	// unmodified copy of file
-	var buffered bytes.Buffer
+	// image
+	var img image.Image       // processed
+	var original bytes.Buffer // unmodified
+	var fullsize *bytes.Buffer
 
 	// image or video?
-	var img image.Image
 	name := CleanName(fh.Filename)
 	ft := up.MediaType(name)
 
 	switch ft {
 
 	case MediaImage:
-		// duplicate file in buffer, since we can only read it from the header once
-		tee := io.TeeReader(file, &buffered)
+
+		// If the image is not too big, we'd prefer to use it unchanged,
+		// but it costs heap for two copies, as we still need to process it for a thumbnail.
+		var rd io.Reader
+		if fh.Size <= int64(up.MaxOriginal) {
+
+			// duplicate file in buffer, since we can only read it from the header once
+			fullsize = &original
+			rd = io.TeeReader(file, fullsize)
+		} else {
+			rd = file
+		}
 
 		// decode image
-		img, err = imaging.Decode(tee, imaging.AutoOrientation(true))
+		img, err = imaging.Decode(rd, imaging.AutoOrientation(true))
 		if err != nil {
 			return err, true // this is a bad image from client
 		}
 
+		size := img.Bounds().Size()
+		if size.X > up.MaxW || size.Y > up.MaxH {
+			fullsize = nil // don't keep extra copy any longer than necessary
+		}
+
 	case MediaAudio, MediaVideo:
-		if _, err := io.Copy(&buffered, file); err != nil {
-			return err, false // don't know why this might fail
+		// these files are typically large, so we can't afford to hold it in memory
+		// must save as a temporary file, even though this will hold up the client's response
+		fn := fileFromNameNew("T", tx, name)
+		path := filepath.Join(up.FilePath, fn)
+		temp, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0666)
+		if err != nil {
+			return err, false // could be a bad name?
+		}
+		_, err = io.Copy(temp, file)
+		temp.Close()
+		if err != nil {
+			return err, false
 		}
 
 	default:
@@ -306,7 +350,7 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId) (err error, byCl
 		name:      name,
 		tx:        tx,
 		mediaType: ft,
-		fullsize:  buffered,
+		fullsize:  fullsize,
 		img:       img,
 	}
 
@@ -339,28 +383,9 @@ func CleanName(name string) string {
 	return string(s[:j])
 }
 
-// fileFromNameRev returns a stored file name from a user's name for a saved media file.
-// Once the parent update has been saved, the owner is the parent ID and the name has a revision number.
-func fileFromNameRev(ownerId int64, name string, rev int) string {
-	if name != "" {
-		return fmt.Sprintf("P-%s$%s-%s",
-			strconv.FormatInt(ownerId, 36),
-			strconv.FormatInt(int64(rev), 36),
-			name)
-	} else {
-		return ""
-	}
-}
-
-// FileFromName returns a stored file name from a user's name for a newly uploaded file.
-// The owner is a transaction code, because the parent object may not exist yet.
-// It has no revision number, so it doesn't overwrite a previous copy yet.
+// FileFromName returns the stored file name for a newly uploaded file.
 func FileFromName(id etx.TxId, name string) string {
-	if name != "" {
-		return fmt.Sprintf("P-%s-%s", etx.String(id), name)
-	} else {
-		return ""
-	}
+	return fileFromNameNew("P", id, name)
 }
 
 // MediaType returns the media type. It is 0 if not accepted.
@@ -370,24 +395,41 @@ func (up *Uploader) MediaType(name string) int {
 	return mt
 }
 
-// ValidCode returns false if the transaction code for a set of uploads has expired.
-func (up *Uploader) ValidCode(tx etx.TxId) bool {
+// Commit makes temporary uploaded files permanent.
+// It returns false if the transaction ID for a set of uploads has expired.
+func (up *Uploader) Commit(tx etx.TxId) error {
 
 	// cutoff time for orphans, less 20%
 	max := (up.MaxAge * 4) / 5
 	cutoff := time.Now().Add(-1 * max)
 
 	// transaction ID is also a timestamp
-	return etx.Timestamp(tx).After(cutoff)
+	if etx.Timestamp(tx).Before(cutoff) {
+		return errors.New("uploader: media files expired")
+	}
+
+	// change extended transaction operation from abort to commit
+	if err := up.tm.Change(tx, OpCommit, &OpTemps{}); err != nil {
+		return err
+	}
+
+	return nil
 }
 
-// DoNext executes the parent's operation specified by etx.SetNext, when all uploaded images have been saved.
+// Deprecated as a misleading name. Use the equivalent Uploader.Commit instead.
+func (up *Uploader) ValidCode(tx etx.TxId) bool {
+	return up.Commit(tx) == nil
+}
+
+// DoNext executes the parent's operation specified by etx.AddNext, when all uploaded images have been saved.
 func (up *Uploader) DoNext(tx etx.TxId) {
 
 	// SERIALISED
 	up.muUploads.Lock()
 
 	// #### There is no way we should lose the operation map, but somehow it has happened, twice.
+	// #### System restarted after Begin. Could have partially uploaded files. Commit could detect,
+	// #### and also wait for uploads to finish, if client didn't. Do all aborts on restart, regardless of time?
 	// Deserialise before we panic, so that we don't hang all new uploads until we run out of memory :-(.
 	if up.ops == nil {
 		up.muUploads.Unlock()
@@ -405,11 +447,11 @@ func (up *Uploader) DoNext(tx etx.TxId) {
 
 	// execute without waiting
 	if !wait {
-		up.tm.DoNext(tx)
+		up.tm.Do(tx)
 	}
 }
 
-// STEP 4 : asyncronous processing of a parent update.
+// STEP 4 : asynchronous processing of a parent update.
 
 // StartBind initiates linking a parent object to a set of uploaded files, returning a context for calls to Bind and EndBind.
 // It loads updated file versions. tx is 0 when we are deleting a parent object.
@@ -514,9 +556,9 @@ func (b *Bind) File(fileName string) (string, error) {
 
 // End completes the linking a parent object. It deletes unused files.
 // This includes:
-//  - old versions that have been superseded;
-//  - the upload names (resulting in deletion if the file wasn't referenced in the saved parent);
-//  - files that are no referenced no more.
+//   - old versions that have been superseded;
+//   - the upload names (resulting in deletion if the file wasn't referenced in the saved parent);
+//   - files that are now referenced no more.
 func (b *Bind) End() error {
 
 	up := b.up
@@ -560,6 +602,79 @@ func Thumbnail(filename string) string {
 }
 
 // IMPLEMENTATION
+
+// changeExt returns a file name with the specified extension.
+func changeExt(name string, ext string) string {
+	return strings.TrimSuffix(name, filepath.Ext(name)) + ext
+}
+
+// changeType normalises a media file extension, and indicates if it should be converted to a displayable type.
+// A blank name is returned for an unsupported format.
+func changeType(name string, audioTypes []string, videoTypes []string) (nm string, changed bool) {
+	var mt int
+	var ext string
+
+	if mt, ext, changed = getType(name, audioTypes, videoTypes); mt != 0 {
+		nm = changeExt(name, ext)
+	}
+	return
+}
+
+// commitTemps processes all temporary files for an committed transaction.
+func (up *Uploader) commitTemps(id etx.TxId) error {
+
+}
+
+// copyStatic copies a static file to the specified directory.
+func copyStatic(toDir, name string, fromFS fs.FS, path string) error {
+	var src fs.File
+	var dst *os.File
+	var err error
+
+	if src, err = fromFS.Open(path); err != nil {
+		return err
+	}
+	defer src.Close()
+
+	if name == "" {
+		name = filepath.Base(path)
+	}
+
+	if dst, err = os.Create(filepath.Join(toDir, name)); err != nil {
+		return err
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return err
+	}
+	return nil
+}
+
+// fileFromNameNew returns a stored file name from a user's name for a newly uploaded file.
+// The owner is a transaction code, because the parent object may not exist yet.
+// The prefix is "T" for a temporary file, and "P" for the permanent one.
+// It has no revision number, so it doesn't overwrite a previous copy yet.
+func fileFromNameNew(prefix string, id etx.TxId, name string) string {
+	if name != "" {
+		return fmt.Sprintf("%s-%s-%s", prefix, etx.String(id), name)
+	} else {
+		return ""
+	}
+}
+
+// fileFromNameRev returns a stored file name from a user's name for a saved media file.
+// Once the parent update has been saved, the owner is the parent ID and the name has a revision number.
+func fileFromNameRev(ownerId int64, name string, rev int) string {
+	if name != "" {
+		return fmt.Sprintf("P-%s$%s-%s",
+			strconv.FormatInt(ownerId, 36),
+			strconv.FormatInt(int64(rev), 36),
+			name)
+	} else {
+		return ""
+	}
+}
 
 // getType returns the mediaType and normalised file extension, and indicates if it is converted.
 // A blank name is returned for an unsupported format.
@@ -609,49 +724,6 @@ func getType(name string, audioTypes []string, videoTypes []string) (mediaType i
 	return
 }
 
-// changeExt returns a file name with the specified extension.
-func changeExt(name string, ext string) string {
-	return strings.TrimSuffix(name, filepath.Ext(name)) + ext
-}
-
-// changeType normalises a media file extension, and indicates if it should be converted to a displayable type.
-// A blank name is returned for an unsupported format.
-func changeType(name string, audioTypes []string, videoTypes []string) (nm string, changed bool) {
-	var mt int
-	var ext string
-
-	if mt, ext, changed = getType(name, audioTypes, videoTypes); mt != 0 {
-		nm = changeExt(name, ext)
-	}
-	return
-}
-
-// copyStatic copies a static file to the specified directory.
-func copyStatic(toDir, name string, fromFS fs.FS, path string) error {
-	var src fs.File
-	var dst *os.File
-	var err error
-
-	if src, err = fromFS.Open(path); err != nil {
-		return err
-	}
-	defer src.Close()
-
-	if name == "" {
-		name = filepath.Base(path)
-	}
-
-	if dst, err = os.Create(filepath.Join(toDir, name)); err != nil {
-		return err
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		return err
-	}
-	return nil
-}
-
 // globVersions finds versions of new or existing files.
 func (up *Uploader) globVersions(pattern string) map[string]fileVersion {
 
@@ -668,7 +740,7 @@ func (up *Uploader) globVersions(pattern string) map[string]fileVersion {
 		if filepath.Ext(name) == ".jpeg" {
 			name = changeExt(name, ".jpg")
 		}
-	
+
 		// index case-blind
 		versions[strings.ToLower(name)] = fileVersion{
 			fileName: fileName,
@@ -701,7 +773,7 @@ func (up *Uploader) opDone(tx etx.TxId) {
 
 	// next operation
 	if next {
-		up.tm.DoNext(tx)
+		up.tm.Do(tx)
 	}
 }
 
@@ -741,7 +813,7 @@ func (up *Uploader) removeOrphans(id etx.TxId) error {
 
 	// all files for transaction
 	tn := etx.String(id)
-	files := up.globVersions(filepath.Join(up.FilePath, "P-"+tn+"-*"))
+	files := up.globVersions(filepath.Join(up.FilePath, "?-"+tn+"-*"))
 
 	for _, f := range files {
 		if err := up.removeMedia(f.fileName); err != nil {
@@ -758,20 +830,18 @@ func (up *Uploader) removeOrphans(id etx.TxId) error {
 // (No conversions are implemented in this version.)
 func (up *Uploader) saveAudio(req reqSave) (bool, error) {
 
+	// temporary file
+	from := filepath.Join(up.FilePath, fileFromNameNew("T", req.tx, req.name))
+
 	// normalise file name
 	name, _ := changeType(req.name, up.AudioTypes, []string{})
 
 	// path for saved file
-	fn := FileFromName(req.tx, name)
-	path := filepath.Join(up.FilePath, fn)
+	fn := fileFromNameNew("P", req.tx, name)
+	to := filepath.Join(up.FilePath, fn)
 
-	// save uploaded audio file
-	audio, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0666)
-	if err != nil {
-		return true, err // could be a bad name?
-	}
-	_, err = io.Copy(audio, &req.fullsize)
-	audio.Close()
+	// no audio conversion, so just rename to a permanent file
+	err := os.Rename(from, to)
 	if err != nil {
 		return true, err
 	}
@@ -782,7 +852,6 @@ func (up *Uploader) saveAudio(req reqSave) (bool, error) {
 	return true, err
 }
 
-
 // saveImage completes image saving, converting and resizing as needed.
 func (up *Uploader) saveImage(req reqSave) error {
 
@@ -790,21 +859,19 @@ func (up *Uploader) saveImage(req reqSave) error {
 	name, convert := changeType(req.name, []string{}, []string{})
 
 	// path for saved files
-	filename := FileFromName(req.tx, name)
+	filename := fileFromNameNew("P", req.tx, name)
 	savePath := filepath.Join(up.FilePath, filename)
 	thumbPath := filepath.Join(up.FilePath, Thumbnail(filename))
 
-	// check if uploaded image small enough to save
-	size := req.img.Bounds().Size()
-	if size.X <= up.MaxW && size.Y <= up.MaxH && !convert {
+	// save uploaded image if it was small enough to use unchanged
+	if req.fullsize != nil && !convert {
 
-		// save uploaded file unchanged
 		saved, err := os.OpenFile(savePath, os.O_WRONLY|os.O_CREATE, 0666)
 		if err != nil {
 			return err // could be a bad name?
 		}
 		defer saved.Close()
-		if _, err = io.Copy(saved, &req.fullsize); err != nil {
+		if _, err = io.Copy(saved, req.fullsize); err != nil {
 			return err
 		}
 
@@ -867,8 +934,8 @@ func (up *Uploader) saveVersion(parentId int64, tx etx.TxId, name string, rev in
 	// Link the file, rather than rename it, so the current version of the parent continues to work.
 	// We'll remove the old name once the parent update has been committed.
 
-	// the file should already be saved without a revision nuumber
-	uploaded := FileFromName(tx, name)
+	// the file should already be saved without a revision number
+	uploaded := fileFromNameNew("P", tx, name)
 	revised := fileFromNameRev(parentId, name, rev)
 
 	// main image ..
@@ -890,7 +957,7 @@ func (up *Uploader) saveVersion(parentId int64, tx etx.TxId, name string, rev in
 // worker does background processing for media.
 func (up *Uploader) worker(
 	chSave <-chan reqSave,
-	chOrphans <-chan OpOrphans,
+	chTemps <-chan OpTemps,
 	chTick <-chan time.Time,
 	chDone <-chan bool) {
 
@@ -907,17 +974,24 @@ func (up *Uploader) worker(
 				up.errorLog.Print(err.Error())
 			}
 
-		case req := <-chOrphans:
-			if err := up.removeOrphans(req.tx); err != nil {
-				up.errorLog.Print(err.Error())
-			}
+		case req := <-chTemps:
+			switch req.opType {
+			case OpAbort:
+				if err := up.removeOrphans(req.tx); err != nil {
+					up.errorLog.Print(err.Error())
+				}
+			case OpCommit:
+				if err := up.commitTemps(req.tx); err != nil {
+					up.errorLog.Print(err.Error())
+				}
+		}
 
 		case <-chTick:
 			// cutoff time for orphans
 			cutoff := time.Now().Add(-1 * up.MaxAge)
 
 			// request timeout for extended transactions started before the cutoff time
-			if err := up.tm.Timeout(up, 0, cutoff); err != nil {
+			if err := up.tm.Timeout(up, OpAbort, cutoff); err != nil {
 				up.errorLog.Print(err.Error())
 			}
 

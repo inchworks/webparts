@@ -7,7 +7,6 @@ package uploader
 import (
 	"fmt"
 	"image"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,16 +19,18 @@ import (
 )
 
 type reqConvert struct {
-	file string
+	name string
 	tx etx.TxId
 }
 
-// convert saves a video file in the specified type.
-func (up *Uploader) convert(fromName string, toType string) error {
+// convert saves a media file in the specified type.
+func (up *Uploader) convert(req reqConvert, toType string, arg ...string) error {
 
+	fromName := fileFromNameNew("T", req.tx, req.name)
 	fromPath := filepath.Join(up.FilePath, fromName)
 
 	// the file may have already been converted, if we are redoing the operations
+	// #### can this really be redone?
 	if exists, err := exists(fromPath); err != nil {
 		return err
 	} else if !exists {
@@ -37,16 +38,41 @@ func (up *Uploader) convert(fromName string, toType string) error {
 	}
 
 	// output file
-	to := strings.TrimSuffix(fromName, filepath.Ext(fromName)) + toType
+	toName := fileFromNameNew("P", req.tx, req.name)
+	toName = strings.TrimSuffix(toName, filepath.Ext(toName)) + toType
 
 	// convert to specified type
-	err := up.ffmpeg("-v", "error", "-i", fromName, to)
+	args := []string{
+		"-v", "error",
+		"-i", fromName}
+	args = append(args, arg...)
+	args = append(args,"-i", fromName, toName)
+	err := up.ffmpeg(arg...)
 
 	// remove original
 	if err == nil {
 		err = os.Remove(fromPath)
 	}
 	return err
+}
+
+// convertAudio saves an audio file.
+func (up *Uploader) convertAudio(req reqConvert, toType string) error {
+
+	return up.convert(req, ".m4a",
+		"-c:a", "aac",
+		"-b:a, 128k",
+	)
+}
+
+// convertVideo saves a video file.
+func (up *Uploader) convertVideo(req reqConvert) error {
+
+	return up.convert(req, ".mp4",
+		"-vf", fmt.Sprint("scale=-2:'min(", up.VideoResolution, ",ih)'"),
+		"-c:v", "libx264",
+		"-preset", "fast",
+		"-c:a", "aac")
 }
 
 // exists returns true if a file already exists
@@ -103,40 +129,26 @@ func (up *Uploader) saveSnapshot(videoName string) error {
 // saveVideo saves the video file and a thumbnail. It returns true if no format conversion is needed.
 func (up *Uploader) saveVideo(req reqSave) (bool, error) {
 
-	// convert non-displable file types to MP3
-	name, convert := changeType(req.name, []string{}, up.VideoTypes)
-	if convert {
-		name = req.name // keep orginal name for files to be converted
-	}
-
-	// path for saved file
-	fn := FileFromName(req.tx, name)
-	path := filepath.Join(up.FilePath, fn)
-
-	// save uploaded video file
-	video, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0666)
-	if err != nil {
-		return true, err // could be a bad name?
-	}
-	_, err = io.Copy(video, &req.fullsize)
-	video.Close()
-	if err != nil {
-		return true, err
-	}
+	// temporary file
+	from := fileFromNameNew("T", req.tx, req.name)
 
 	// add a snapshot thumbnail
-	err = up.saveSnapshot(fn)
+	err := up.saveSnapshot(from)
 	if err != nil {
 		return true, err
 	}
 
-	// convert video format, if we can
+	// convert non-displayable video formats to MP4, if we can
+	_, convert := changeType(req.name, []string{}, up.VideoTypes)
 	if convert && up.VideoPackage != "" {
-		up.chConvert <- reqConvert{file: fn, tx: req.tx}
+		up.chConvert <- reqConvert{name: req.name, tx: req.tx}
 		return false, nil
+
 	} else {
-		// #### could use "ffmpeg -f null" to validate as a video
-		return true, nil // done
+		// rename to a permanent file
+		to := fileFromNameNew("P", req.tx, req.name)
+		err := os.Rename(filepath.Join(up.FilePath, from), filepath.Join(up.FilePath, to))
+			return true, err
 	}
 }
 
@@ -212,7 +224,7 @@ func (up *Uploader) videoWorker(
 		case req := <-chConvert:
 
 			// convert video
-			if err := up.convert(req.file, ".mp4"); err != nil {
+			if err := up.convertVideo(req); err != nil {
 				up.errorLog.Print(err.Error())
 			}
 			up.opDone(req.tx)
