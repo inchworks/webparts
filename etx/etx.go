@@ -10,6 +10,8 @@ package etx
 import (
 	"encoding/json"
 	"errors"
+	"math"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -18,12 +20,14 @@ import (
 // App is the interface to functions provided by the parent application.
 type App interface {
 	// Log optionally records an error
-	Log(error) // ## not used
+	Log(error)
 }
 
-// Extended transaction operation identifier
-// (Misnamed now, to avoid an interface change.)
+// Extended transaction identifier
 type TxId int64
+
+// Operation identifier
+type OpId int64
 
 // RM is the interface for a resource manager, which implements operations.
 // ## The id parameter is clumsy, because the RM will need to embed it in the op before calling a worker,
@@ -31,7 +35,7 @@ type TxId int64
 type RM interface {
 	Name() string                         // manager name, for the redo log
 	ForOperation(opType int) Op           // return operation struct to receive unmarshalled data
-	Operation(id TxId, opType int, op Op) // operation for execution
+	Operation(id OpId, opType int, op Op) // operation for execution
 }
 
 // Op is the interface to an RM operation.
@@ -39,16 +43,23 @@ type RM interface {
 type Op interface {
 }
 
-// Redo struct holds the stored data for a transaction operation.
+const (
+	redoNext  = 1
+	redoTimed = 2
+)
+
+// Redo struct holds the stored data for a V2 transaction operation.
 type Redo struct {
 	Id        int64  // operation ID
 	Manager   string // resource manager name
+	RedoType  int    // transaction manager's type
+	Delay     int    // timed delay, in seconds
 	OpType    int    // operation type
 	Operation []byte // operation arguments, in JSON
 }
 
-// RedoStore is the interface for storage of extended transactions, implemented by the parent application.
-// The store must implement database transactions so that tx.Redo records are stored either:
+// RedoStore is the interface for storage of V2 extended transactions, implemented by the parent application.
+// The store must implement database transactions so that tx.Redo2 records are stored either:
 // (1) with the associated RM database transaction, or (2) before the associated RM idempotent operation.
 type RedoStore interface {
 	All() []*Redo                               // all redo log entries in ID order
@@ -62,19 +73,28 @@ type RedoStore interface {
 // TM holds transaction manager state, and dependencies of this package on the parent application.
 // It has no non-volatile state of its own.
 type TM struct {
-	app   App
-	store RedoStore
+	app     App
+	store   RedoStore
+	storeV1 RedoStoreV1
+
+	// background worker
+	tick   *time.Ticker
+	chDone chan bool
 
 	// state
 	mu     sync.Mutex
-	etx   map[int64][]*nextOp
+	etx0    map[TxId][]*nextOp // immediate
+	etx1    map[TxId][]*nextOp // delayed
 	lastId TxId
+	maxV1  OpId // the last operation found in the V1 store
 }
 
 // next caches the next operation for a transaction
 type nextOp struct {
-	id     TxId
-	rm     RM
+	id     OpId
+	rm     RM // set nil when operation is ended or forgotten
+	due    time.Time
+	tmType int
 	opType int
 	op     Op
 }
@@ -82,12 +102,19 @@ type nextOp struct {
 // New initialises the transaction manager.
 func New(app App, store RedoStore) *TM {
 
-	return &TM{
+	tm := &TM{
 		app:   app,
 		store: store,
 		mu:    sync.Mutex{},
-		etx:  make(map[int64][]*nextOp, 8),
+		etx0:   make(map[TxId][]*nextOp, 8),
+		etx1:   make(map[TxId][]*nextOp, 8),
 	}
+
+	// start background worker
+	tm.tick = time.NewTicker(time.Minute)
+	go tm.worker(tm.tick.C, tm.chDone)
+
+	return tm
 }
 
 // Begin returns the ID for a new extended transaction.
@@ -110,108 +137,67 @@ func (tm *TM) Begin() TxId {
 
 // AddNext adds an operation to the extended transaction, to be executed after the previous one.
 // Database changes may have been requested, but must not be commmitted yet.
-// The returned operation ID is needed only if TM.Change is to be called.
-func (tm *TM) AddNext(opId TxId, rm RM, opType int, op Op) (TxId, error) {
+// The returned operation ID is needed only if TM.Forget is to be called.
+func (tm *TM) AddNext(tx TxId, rm RM, opType int, op Op) (OpId, error) {
 
-	nTx, _ := txOp(opId) // ## verify nOp?
-	nxt := &nextOp{
-		id:     opId,
-		rm:     rm,
-		opType: opType,
-		op:     op,
-	}
-	
-	// SERIALISED
-	tm.mu.Lock()
-
-	etx := tm.etx[nTx]
-	if etx == nil {
-		// save the first operation, for execution ..
-		tm.etx[nTx] = make([]*nextOp, 1, 4)
-		tm.etx[nTx][0] = nxt
-	} else {
-		// add an operation
-		tm.etx[nTx] = append(tm.etx[nTx], nxt)
-	}
-	newOpId := idOp(nTx, len(etx)-1)
-	
-	tm.mu.Unlock()
-
-	// .. and save for recovery
-	r := Redo{
-		Id: int64(newOpId),
-		Manager: rm.Name(),
-		OpType: opType,
-	}
-	var err error
-	r.Operation, err = json.Marshal(op)
-	if err != nil {
-		return 0, err
-	}
-
-	return newOpId, tm.store.Insert(&r)
+	return tm.addOp(tx, rm, redoNext, 0, opType, op)
 }
 
-// Change modifies an operation before it has been executed.
-// Typically this is used where an RM has added an operation to rollback preparation,
-// and now knows that the extended transaction is to go ahead.
-// #### But how can the RM know the operation ID?
-func (tm *TM) Change(opId TxId, opType int, op Op) error {
+// AddTimed adds an operation to the extended transaction, to be executed after the specified delay.
+// The delay time has a resolution of one minute, and a maximum of 90 days.
+func (tm *TM) AddTimed(tx TxId, rm RM, opType int, op Op, after time.Duration) (OpId, error) {
 
-	nTx, nOp := txOp(opId)
-	
-	// SERIALISED
-	tm.mu.Lock()
-
-	etx := tm.etx[nTx]
-	if etx == nil || nOp >= len(etx) {
-		tm.mu.Unlock()
-		return errors.New("TM.Change: invalid ID")
+	// delay in seconds
+	delay := int(math.Round(after.Seconds()))
+	if delay == 0 {
+		delay = 1
 	}
-	txOp := etx[nOp]
-
-	// change operation
-	txOp.opType = opType
-	txOp.op = op
-
-	tm.mu.Unlock()
-
-	// .. and save for recovery
-	r := Redo{
-		Id: int64(opId),
-		Manager: txOp.rm.Name(),
-		OpType: opType,
-	}
-	var err error
-	r.Operation, err = json.Marshal(op)
-	if err != nil {
-		return err
-	}
-
-	return tm.store.Update(&r)
+	return tm.addOp(tx, rm, redoTimed, delay, opType, op)
 }
 
 // Do executes the operations specified by AddNext().
 // It must be called after database changes have been committed.
 // ## This should be the etx ID? Enforce that?
-func (tm *TM) Do(opId TxId) error {
+func (tm *TM) Do(tx TxId) error {
 
-	return tm.do(opId, 0) // first op
+	return tm.doNext(tx, 0) // first op
 }
 
 // End terminates and forgets the operation, and executes the next one.
-func (tm *TM) End(opId TxId) error {
+func (tm *TM) End(opId OpId) error {
+
+	// V1 end is simple - just forget the operation because V1 transactions are single operations
+	if opId <= tm.maxV1 {
+		return tm.storeV1.DeleteId(int64(opId))
+	}
 
 	// forget this operation
-	if err := tm.store.DeleteId(int64(opId)); err != nil {
+	err := tm.store.DeleteId(int64(opId))
+	if err != nil {
 		return err
 	}
 
-	// execute the next one
-	return tm.do(opId, opId)
+	txId := Transaction(opId)
+	if tm.etx0[txId] == nil {
+		// execute the next immediate operation
+		err = tm.doNext(txId, opId)
+	} else {
+		// if there are no immediate operations, we might have another timed operation
+		err = tm.doTimed(txId)
+	}
+	return err
 }
 
-// Id returns an operation identifier from its string representation.
+// Forget discards all operations of a specified type in a transaction as not needed.
+func (tm *TM) Forget(tx TxId, rm RM, opType int) error {
+
+	if err := tm.forget(tx, rm, opType, tm.etx0); err != nil {
+		return err
+	}
+	return tm.forget(tx, rm, opType, tm.etx1)
+}
+
+// Id returns a transaction identifier from its string representation.
 func Id(s string) (TxId, error) {
 	id, err := strconv.ParseInt(s, 36, 64)
 	return TxId(id), err
@@ -226,11 +212,8 @@ func (tm *TM) Recover(mgrs ...RM) error {
 		rms[rm.Name()] = rm
 	}
 
-	// #### link operations into transactions
-
 	// recover from transaction log
 	ts := tm.store.All()
-	var lastTx int64
 	for _, t := range ts {
 
 		// SERIALISED ## unnecessary?
@@ -243,112 +226,95 @@ func (tm *TM) Recover(mgrs ...RM) error {
 		}
 		op := rm.ForOperation(t.OpType)
 		if err := json.Unmarshal(t.Operation, op); err != nil {
-			return err
+			tm.mu.Unlock()
+			tm.app.Log(err)
+			continue
 		}
-	
 		nxt := &nextOp{
-			id:     TxId(t.Id),
+			id:     OpId(t.Id),
 			rm:     rm,
+			due:    Timestamp(TxId(t.Id)).Add(time.Minute * time.Duration(t.Delay)),
+			tmType: t.RedoType,
 			opType: t.OpType,
 			op:     op,
 		}
-		nTx, _ := txOp(TxId(t.Id))
-	
-		if nTx != lastTx {
-			// first operation of transaction
-			tm.etx[nTx] = make([]*nextOp, 1, 4)
-			tm.etx[nTx][0] = nxt
-			lastTx = nTx
-		} else {
-			// add an operation
-			tm.etx[nTx] = append(tm.etx[nTx], nxt)
-		}
+		tx, _ := txOp(OpId(t.Id))
+
+		tm.saveOp(tx, nxt)
 		tm.mu.Unlock()
 	}
 
-	// redo first operation of each extended transaction
-	// #### needn't be starting at the first. Could be some missing? End() must handle these cases.
-	// ## ok that returns on any error
-	for _, etx := range tm.etx {
-		if err := tm.Do(etx[0].id); err != nil {
-			return err
+	// redo first immediate operation of each extended transaction
+	for _, etx := range tm.etx0 {
+		if err := tm.doNext(Transaction(etx[0].id), 0); err != nil {
+			tm.app.Log(err)
 		}
 	}
-	
+
 	return nil
 }
 
-// String formats an operation identifier.
-func String(opId TxId) string {
-	return strconv.FormatInt(int64(opId), 36)
+// String formats a transaction number.
+func String(tx TxId) string {
+	return strconv.FormatInt(int64(tx), 36)
 }
 
-// 	Timestamp returns the start time of an extended transaction.
-func Timestamp(opId TxId) time.Time {
-	nTx, _ := txOp(opId)
+// Timestamp returns the start time of an extended transaction.
+func Timestamp(tx TxId) time.Time {
+	nTx := int64(tx)
 	return time.Unix(0, nTx) // transaction ID is also a timestamp
 }
 
-// Timeout executes any old operations for a resource manager.
-// A non-zero opType selects the specified type.
-// #### Need a more controlled execute/purge choice.
-func (tm *TM) Timeout(rm RM, opType int, before time.Time) error {
+// Transaction returns the extended transaction ID for an operation.
+func Transaction(opId OpId) TxId {
+	tx, _ := txOp(opId)
+	return tx
+}
 
-	// recover using transaction log
-	ts := tm.store.ForManager(rm.Name(), before.UnixNano())
-	for _, t := range ts {
-		if opType == 0 || t.OpType == opType {
-			// operation
-			op := rm.ForOperation(t.OpType)
-			if err := json.Unmarshal(t.Operation, op); err != nil {
-				return err
-			}
+// addOp adds a next or timed operation to an extended transaction
+func (tm *TM) addOp(tx TxId, rm RM, tmType int, delay int, opType int, op Op) (OpId, error) {
 
-			// do operation
-			rm.Operation(TxId(t.Id), t.OpType, op)
-		}
+	nxt := &nextOp{
+		rm:     rm,
+		due:    Timestamp(tx).Add(time.Minute * time.Duration(delay)),
+		tmType: tmType,
+		opType: opType,
+		op:     op,
 	}
-	return nil
+
+	// SERIALISED
+	tm.mu.Lock()
+
+	nOps := tm.saveOp(tx, nxt)
+
+	newOpId := idOp(tx, nOps-1)
+	nxt.id = newOpId
+
+	tm.mu.Unlock()
+
+	// .. and save for recovery
+	r := Redo{
+		Id:      int64(newOpId),
+		Manager: rm.Name(),
+		OpType:  opType,
+	}
+	var err error
+	r.Operation, err = json.Marshal(op)
+	if err != nil {
+		return 0, err
+	}
+
+	return newOpId, tm.store.Insert(&r)
 }
 
-// Deprecated as a misleading name. Use the equivalent TM.AddNext instead.
-func (tm *TM) BeginNext(first TxId, rm RM, opType int, op Op) error {
-	_, err := tm.AddNext(first, rm, opType, op)
-	return err
-}
-
-// Deprecated as a misleading name. Use the equivalent TM.Do instead.
-func (tm *TM) DoNext(id TxId) {
-	tm.Do(id)
-}
-
-// Deprecated as too general. Use TM.AddNext in most cases, and TM.Change to modify an existing operation.
-func (tm *TM) SetNext(id TxId, rm RM, opType int, op Op) error {
-
-		// adding or changing operation?
-		r, err := tm.store.GetIf(int64(id))
-		if err != nil {
-			return err
-		}
-		if r == nil {
-			_, err := tm.AddNext(id, rm, opType, op)
-			return err
-		} else {
-			return tm.Change(id, opType, op)
-		}		
-}
-
-// do executes the specifed operation.
-// The transaction is specified by any operation of the transaction.
-func (tm *TM) do(txId TxId, afterOp TxId) error {
-
-	nTx, _ := txOp(txId)
+// doNext executes the next immediate operation of the specified transaction.
+func (tm *TM) doNext(tx TxId, afterOp OpId) error {
 
 	// SERIALIZED
 	tm.mu.Lock()
 
 	// transaction
-	etx := tm.etx[nTx]
+	etx := tm.etx0[tx]
 	if etx == nil {
 		tm.mu.Unlock()
 		return errors.New("etx: Invalid operation ID")
@@ -357,8 +323,14 @@ func (tm *TM) do(txId TxId, afterOp TxId) error {
 	// find the next operation, if there is one
 	// Note that on recovery the first operation needn't be #0, so we search.
 	var op *nextOp
+	var rm RM
 	for _, nxt := range etx {
-		if nxt.id > afterOp {
+		if nxt.id > afterOp && nxt.rm != nil {
+
+			// disable in cache (quicker than trimming the slice)
+			rm = nxt.rm //
+			nxt.rm = nil
+
 			op = nxt
 			break
 		}
@@ -366,33 +338,149 @@ func (tm *TM) do(txId TxId, afterOp TxId) error {
 
 	// delete transaction if there are no more ops
 	if op == nil {
-		delete(tm.etx, nTx)
+		delete(tm.etx0, tx)
 		tm.mu.Unlock()
 		return nil
 	}
 
 	// operation
 	tm.mu.Unlock()
-	op.rm.Operation(op.id, op.opType, op.op)
-	return nil	
+	rm.Operation(op.id, op.opType, op.op)
+	return nil
+}
+
+// doTimed executes the next ready timed operation of the specified transaction.
+func (tm *TM) doTimed(tx TxId) error {
+
+	now := time.Now()
+
+	// SERIALIZED
+	tm.mu.Lock()
+
+	// transaction
+	etx := tm.etx1[tx]
+	if etx == nil {
+		tm.mu.Unlock()
+		return errors.New("etx: Invalid operation ID")
+	}
+
+	// find the next operation, if there is one
+	// Note that on recovery the first operation needn't be #0, so we search.
+	var op *nextOp
+	var rm RM
+	// ## inefficient because not ordered by due time, and may be lots
+	for _, nxt := range etx {
+		if nxt.rm != nil && nxt.due.Before(now)  {
+
+			// disable in cache (quicker than trimming the slice)
+			rm = nxt.rm //
+			nxt.rm = nil
+
+			op = nxt
+			break
+		}
+	}
+
+	// delete transaction if there are no more ops
+	if op == nil {
+		delete(tm.etx1, tx)
+		tm.mu.Unlock()
+		return nil
+	}
+
+	// operation
+	tm.mu.Unlock()
+	rm.Operation(op.id, op.opType, op.op)
+	return nil
+}
+
+// forget discards operations of a specified type, either immediate or timed.
+func (tm *TM) forget(tx TxId, rm RM, opType int, etxMap map[TxId][]*nextOp) error {
+
+	for _, opn := range etxMap[tx] {
+		if opn.rm == rm && opn.op == opType {
+			// disable in cache (quicker than trimming the slice)
+			opn.rm = nil
+
+			// forget this operation
+			if err := tm.store.DeleteId(int64(opn.id)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // idOp constructs an operation ID from extended transaction ID and operation number
-func idOp(nTx int64, nOp int) TxId {
+func idOp(tx TxId, nOp int) OpId {
 	// ## no more than 1023 ops
-	return TxId(nTx + int64(nOp))
+	return OpId(int64(tx) + int64(nOp))
 }
 
 // idTx constructs an extended transaction ID from a time in nS.
 func idTx(t int64) TxId {
-	return TxId(t - t & 1<<10-1)
+	return TxId(t - t&(1<<10-1)) // remove low 9 bits
+}
+
+// saveOp adds an operation to the cached list. It returns the number of operations.
+func (tm *TM) saveOp(tx TxId, nxt *nextOp) int {
+
+	// choose map for immediate or timed operations
+	var etxMap map[TxId][]*nextOp
+	switch nxt.tmType {
+	case redoNext:
+		etxMap = tm.etx0
+	case redoTimed:
+		etxMap = tm.etx1
+	default:
+		tm.app.Log(errors.New("etx: Unknown RedoType"))
+		return 0
+	}
+
+	if etxMap[tx] == nil {
+		// first operation for the transaction
+		etxMap[tx] = make([]*nextOp, 1, 4)
+		etxMap[tx][0] = nxt
+	} else {
+		// add an operation
+		etxMap[tx] = append(etxMap[tx], nxt)
+	}
+	return len(etxMap)
 }
 
 // txop returns the extended transaction ID and operation number
-func txOp(opId TxId) (tx int64, nOp int) {
+func txOp(opId OpId) (tx TxId, nOp int) {
 	t := int64(opId)
-	n := t & 1<<10-1
-	tx = t - n
+	n := t & (1<<10 - 1)
+	tx = TxId(t - n)
 	nOp = int(n)
 	return
+}
+
+// worker executes delayed operations.
+func (tm *TM) worker(
+	chTick <-chan time.Time,
+	chDone <-chan bool) {
+
+	for {
+		// returns to client sooner?
+		runtime.Gosched()
+
+		select {
+		case <-chTick:
+			// find all operations that are due
+			for _, etx := range tm.etx1 {
+
+				// only when there are no immediate operations for this transaction
+				if tm.etx0[Transaction(etx[0].id)] == nil {
+					if err := tm.doTimed(Transaction(etx[0].id)); err != nil {
+						tm.app.Log(err)
+					}
+				}
+			}
+
+		case <-chDone:
+			return
+		}
+	}
 }

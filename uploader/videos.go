@@ -2,7 +2,7 @@
 
 package uploader
 
-// Video file processing.
+// Audio and video file processing.
 
 import (
 	"fmt"
@@ -14,23 +14,16 @@ import (
 	"time"
 
 	"github.com/disintegration/imaging"
-
-	"github.com/inchworks/webparts/etx"
 )
 
-type reqConvert struct {
-	name string
-	tx etx.TxId
-}
-
 // convert saves a media file in the specified type.
-func (up *Uploader) convert(req reqConvert, toType string, arg ...string) error {
+func (up *Uploader) convert(req reqSave, toType string, arg ...string) error {
 
-	fromName := fileFromNameNew("T", req.tx, req.name)
+	fromName := req.name
 	fromPath := filepath.Join(up.FilePath, fromName)
 
 	// the file may have already been converted, if we are redoing the operations
-	// #### can this really be redone?
+	//  can this really be redone?
 	if exists, err := exists(fromPath); err != nil {
 		return err
 	} else if !exists {
@@ -38,15 +31,16 @@ func (up *Uploader) convert(req reqConvert, toType string, arg ...string) error 
 	}
 
 	// output file
-	toName := fileFromNameNew("P", req.tx, req.name)
-	toName = strings.TrimSuffix(toName, filepath.Ext(toName)) + toType
+	toName := changePrefix("P", fromName)
+	toName = changeExt(toName, toType)
 
 	// convert to specified type
+	// ## why 2 x -i ??
 	args := []string{
 		"-v", "error",
 		"-i", fromName}
 	args = append(args, arg...)
-	args = append(args,"-i", fromName, toName)
+	args = append(args, "-i", fromName, toName)
 	err := up.ffmpeg(arg...)
 
 	// remove original
@@ -56,23 +50,23 @@ func (up *Uploader) convert(req reqConvert, toType string, arg ...string) error 
 	return err
 }
 
-// convertAudio saves an audio file.
-func (up *Uploader) convertAudio(req reqConvert, toType string) error {
+// convertAV saves an audio or video file.
+func (up *Uploader) convertAV(req reqSave) error {
 
-	return up.convert(req, ".m4a",
-		"-c:a", "aac",
-		"-b:a, 128k",
-	)
-}
-
-// convertVideo saves a video file.
-func (up *Uploader) convertVideo(req reqConvert) error {
-
-	return up.convert(req, ".mp4",
-		"-vf", fmt.Sprint("scale=-2:'min(", up.VideoResolution, ",ih)'"),
-		"-c:v", "libx264",
-		"-preset", "fast",
-		"-c:a", "aac")
+	switch req.mediaType {
+	case MediaAudio:
+		return up.convert(req, req.toType,
+			"-c:a", "aac",
+			"-b:a, 128k",
+		)
+	case MediaVideo:
+		return up.convert(req, req.toType,
+			"-vf", fmt.Sprint("scale=-2:'min(", up.VideoResolution, ",ih)'"),
+			"-c:v", "libx264",
+			"-preset", "fast",
+			"-c:a", "aac")
+	}
+	return nil
 }
 
 // exists returns true if a file already exists
@@ -127,33 +121,54 @@ func (up *Uploader) saveSnapshot(videoName string) error {
 }
 
 // saveVideo saves the video file and a thumbnail. It returns true if no format conversion is needed.
-func (up *Uploader) saveVideo(req reqSave) (bool, error) {
+func (up *Uploader) saveAV(req reqSave) (bool, error) {
 
-	// temporary file
-	from := fileFromNameNew("T", req.tx, req.name)
+	fromName := req.name
 
 	// add a snapshot thumbnail
-	err := up.saveSnapshot(from)
+	var err error
+	switch req.mediaType {
+	case MediaAudio:
+		// add a dummy thumbnail
+		err = copyStatic(up.FilePath, Thumbnail(fromName), WebFiles, "web/static/audio.png")
+
+	case MediaVideo:
+		// ### better to do this from smaller file after conversion!
+		err = up.saveSnapshot(fromName)
+	}
 	if err != nil {
 		return true, err
 	}
 
-	// convert non-displayable video formats to MP4, if we can
-	_, convert := changeType(req.name, []string{}, up.VideoTypes)
-	if convert && up.VideoPackage != "" {
-		up.chConvert <- reqConvert{name: req.name, tx: req.tx}
+	// convert non-displayable AV formats, if we can
+	// ### handle unrecognised types
+	fromPath := filepath.Join(up.FilePath, fromName)
+	toName, toType, convert := changeType(req.name, up.AudioTypes, up.VideoTypes)
+	if up.VideoPackage != "" {
+		if !convert {
+			// is file small enough to keep the original unprocessed?
+			fi, err := os.Stat(fromPath)
+			if err == nil && fi.Size() > int64(up.MaxSize) {
+				req.toType = toType
+				convert = true
+			}
+		}
+	}
+	if convert {
+		req.toType = toType
+		up.chConvert <- req
 		return false, nil
 
 	} else {
 		// rename to a permanent file
-		to := fileFromNameNew("P", req.tx, req.name)
-		err := os.Rename(filepath.Join(up.FilePath, from), filepath.Join(up.FilePath, to))
-			return true, err
+		toName = changePrefix("P", toName)
+		err := os.Rename(fromPath, filepath.Join(up.FilePath, toName))
+		return true, err
 	}
 }
 
 // frame generates a freeze frame image, and returns its path.
-func (up *Uploader) snapshot(fromName string, prefix string, after time.Duration) (string, error){
+func (up *Uploader) snapshot(fromName string, prefix string, after time.Duration) (string, error) {
 
 	// output file name
 	to := prefix + strings.TrimSuffix(fromName[1:], filepath.Ext(fromName)) + ".jpg"
@@ -214,20 +229,19 @@ func strDuration(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
 }
 
-// videoWorker does background video processing.
-func (up *Uploader) videoWorker(
-	chConvert <-chan reqConvert,
+// avWorker does background audio/video processing.
+func (up *Uploader) avWorker(
+	chConvert <-chan reqSave,
 	done <-chan bool) {
 
 	for {
 		select {
 		case req := <-chConvert:
-
-			// convert video
-			if err := up.convertVideo(req); err != nil {
+			// convert audio or video
+			if err := up.convertAV(req); err != nil {
 				up.errorLog.Print(err.Error())
 			}
-			up.opDone(req.tx)
+			up.opDone(req.claim)
 
 		case <-done:
 			// ## do something to finish other pending requests
