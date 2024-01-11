@@ -35,7 +35,7 @@
 // In single database transaction,call tx.Begin to start an extended transaction,
 // call Delete for each media file referenced, delete the object and commit the deletion to the database.
 //
-// #### Check that this is sufficient, and done.
+// ### Check that this is sufficient, and done.
 //
 // Use Thumbnail to get the file name for a thumbnail image corresponding to a media file.
 //
@@ -52,7 +52,7 @@
 
 // ### Issue: what if an image is referenced twice by the parent, and one reference is removed. -> Caller's problem.
 
-// #### Issue: what if client sends an upload after submitting the form. Can it be recognised for error and deletion?
+// ### Issue: what if client sends an upload after submitting the form. Can it be recognised for error and deletion?
 
 package uploader
 
@@ -111,6 +111,7 @@ type Uploader struct {
 	chDone    chan bool
 	chSave    chan reqSave
 	chClaimed chan reqClaimed
+	chBound   chan reqBound
 	chCancel  chan OpCancel
 	chDelete  chan OpDelete
 
@@ -144,6 +145,7 @@ type Bind struct {
 	up       *Uploader
 	tx       etx.TxId
 	prefixTx string
+	unbound  map[string]string
 }
 
 type reqSave struct {
@@ -157,15 +159,18 @@ type reqClaimed struct {
 	claim *Claim
 }
 
+type reqBound struct {
+	bind *Bind
+}
+
 // DB is an interface to the database manager that handles parent transactions.
 type DB interface {
 	Begin() func() // start transaction and return commit function
 }
 
+// ### do something to handle different media types with same name, or replace with a string
 type fileVersion struct {
 	fileName string
-	upload   bool
-	keep     bool
 }
 
 // WebFiles are the package's web resources (templates and static files)
@@ -250,11 +255,12 @@ func (up *Uploader) Initialise(log *log.Logger, db DB, tm *etx.TM) {
 	up.chDone = make(chan bool, 1)
 	up.chSave = make(chan reqSave, 16)
 	up.chClaimed = make(chan reqClaimed, 4)
+	up.chBound = make(chan reqBound, 4)
 	up.chCancel = make(chan OpCancel, 4)
 	up.chDelete = make(chan OpDelete, 4)
 
 	// start background worker
-	go up.worker(up.chSave, up.chClaimed, up.chCancel, up.chDelete, up.chDone)
+	go up.worker(up.chSave, up.chClaimed, up.chBound, up.chCancel, up.chDelete, up.chDone)
 
 	// separate worker for video processing
 	up.chVideosDone = make(chan bool, 1)
@@ -313,6 +319,7 @@ func NameFromFile(fileName string) (string, string) {
 }
 
 // STEP 2 : when AJAX request received to upload file. Call Save with the transaction code.
+// #### Filenames must be unique within the transaction, so that later deletion of one reference does not invalidate other references.
 
 // Save creates a temporary copy of an uploaded file, to be processed later.
 func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId) (err error, byClient bool) {
@@ -355,7 +362,6 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId) (err error, byCl
 //
 // (iii) If the media name is new or changed, call FileFromName to get the temporary file name to be stored in the database.
 // Call Delete for existing media files that are to be deleted or replaced.
-// #### What if deleted in one place, still referenced in another? Remove from deletion list? Or somehow make all references unique.
 //
 // (iv) Call tx.AddNext ensure the next step will be executed, commit the change to the database, and call tx.Do.
 
@@ -419,12 +425,12 @@ func (up *Uploader) Commit(tx etx.TxId) error {
 // Delete removes a media file after a delay to allow for cached web pages holding references to be aged.
 func (up *Uploader) Delete(tx etx.TxId, filename string) error {
 
-	if filename == "" {
+	// Ignore deletion requests for temporary files, so current processing not interfered.
+	// (Could be from an overlapping transaction.)
+	if filename == "" || filename[0] == 'T' {
 		return nil
 	}
 
-	// #### Ignore deletion requests for temporary files, so current processing not interfered.
-	// (Could be from an overlapping transaction.)
 	if _, err := up.tm.AddTimed(tx, up, 0, &OpDelete{Name: filename}, up.DeleteAfter); err != nil {
 		return err
 	}
@@ -454,12 +460,12 @@ func (up *Uploader) StartClaim(tx etx.TxId) *Claim {
 	}
 
 	// list all unclaimed files
-	// ## could be simpler than globVersions
+	// ## error ignored
 	txCode := etx.String(tx)
-	uploads := up.globVersions(filepath.Join(up.FilePath, "T-"+txCode+"-*"))
+	uploads, _ := filepath.Glob(filepath.Join(up.FilePath, "T-"+txCode+"-*"))
 
-	for _, fv := range uploads {
-		c.unclaimed[fv.fileName] = true
+	for _, f := range uploads {
+		c.unclaimed[filepath.Base(f)] = true
 	}
 
 	return c
@@ -467,7 +473,6 @@ func (up *Uploader) StartClaim(tx etx.TxId) *Claim {
 
 // File specifies a file that is referenced by the client.
 // It is legal to specify files from other transactions; these will be ignored.
-// #### Return and use new file name.
 func (c *Claim) File(name string) {
 
 	up := c.up
@@ -491,10 +496,8 @@ func (c *Claim) File(name string) {
 	}
 }
 
-// End deletes any unclaimed files and requests notification when uploads are done.
+// End requests notification when uploads are done. Any unclaimed temporarary files are deleted.
 func (c *Claim) End(fn Uploaded) {
-
-	// #### move to syncronous bind.End, because additional files to be deleted after overlapping transactions.
 
 	up := c.up
 
@@ -503,9 +506,8 @@ func (c *Claim) End(fn Uploaded) {
 	c.uploads++
 	up.muUploads.Unlock()
 
-	// delete any unclaimed files
-	// requested even if there are none, so caller always gets an asyncronous notification
-	// (can't notify synchronously because caller probably holds database locks)
+	// delete any unclaimed files, and notify when processing is done
+	// (can never notify synchronously because caller probably holds database locks)
 	c.done = fn
 	up.chClaimed <- reqClaimed{
 		claim: c,
@@ -524,14 +526,27 @@ func (c *Claim) End(fn Uploaded) {
 func (up *Uploader) StartBind(tx etx.TxId) *Bind {
 
 	// target temporarary files
-	prefixTx := "T-" + etx.String(tx)
+	txCode := etx.String(tx)
+	prefixTx := "T-" + txCode
 
 	// ## keep function for future implementation with error reporting.
-	return &Bind{
+	b := &Bind{
 		up:       up,
 		tx:       tx,
 		prefixTx: prefixTx,
+		unbound: make(map[string]string, 4),
+
 	}
+
+	// list all processed files (extensions may have changed)
+	processed, _ := filepath.Glob(filepath.Join(up.FilePath, "P-"+txCode+"-*"))
+
+	for _, f := range processed {
+		fn := filepath.Base(f)
+		nm := strings.TrimSuffix(fn, filepath.Ext(fn))
+		b.unbound[nm] = fn
+	}
+	return b
 }
 
 // File is called to check if a file has changed.
@@ -545,22 +560,36 @@ func (b *Bind) File(fileName string) (string, error) {
 		return "", nil
 	}
 
-	// #### may have a different file type
-
 	// prefix+tx and media name
 	prefixTx, _ := cutN(fileName, '-', 2)
 
 	if prefixTx == b.prefixTx {
-		return "P" + fileName[1:], nil // new permanent name
+		nm := strings.TrimSuffix(fileName, filepath.Ext(fileName)) // ### make this a function
+
+		pnm := "P" + nm[1:]
+		newName := b.unbound[pnm] // new name and extension
+		if newName != "" {
+			delete(b.unbound, pnm)
+		}
+	
+		return newName, nil // new permanent name
 	}
 
 	return "", nil
 }
 
-// End completes the linking a parent object.
+// End completes the linking a parent object, and deletes any files for the transaction that are not required.
 func (b *Bind) End() error {
 
-	// ## keep function for future implementation with error reporting.
+	// delete any unclaimed files
+	// We can't do file deletion sooner, because additional files may become unused after an overlapping transactions.
+	// requested even if there are none, so caller always gets an asyncronous notification
+	// (can't notify synchronously because caller probably holds database locks)
+	b.up.chBound <- reqBound{
+		bind: b,
+	}
+
+	// ## keep status future implementation with error reporting.
 	return nil
 }
 
@@ -779,6 +808,7 @@ func (up *Uploader) removeOrphan(req OpDelete) error {
 func (up *Uploader) removeOrphans(id etx.OpId) error {
 
 	// all files for transaction
+	// ### still globVersions and not just Glob?
 	tn := etx.String(etx.Transaction(id))
 	files := up.globVersions(filepath.Join(up.FilePath, "?-"+tn+"-*"))
 
@@ -822,7 +852,6 @@ func (up *Uploader) removeMedia(fileName string) error {
 	}
 	return nil
 }
-
 
 // saveImage completes image saving, converting and resizing as needed.
 func (up *Uploader) saveImage(req reqSave) error {
@@ -941,6 +970,7 @@ func (up *Uploader) saveVersion(parentId int64, tx etx.TxId, name string, rev in
 func (up *Uploader) worker(
 	chSave <-chan reqSave,
 	chClaimed <-chan reqClaimed,
+	chBound <-chan reqBound,
 	chCancel <-chan OpCancel,
 	chDelete <-chan OpDelete,
 	chDone <-chan bool) {
@@ -963,7 +993,18 @@ func (up *Uploader) worker(
 				if err := os.Remove(filepath.Join(up.FilePath, nm)); err != nil {
 					up.errorLog.Print(err.Error())
 				}
-				up.opDone(req.claim)
+			}
+
+			// notify that all uploaded files have been claimed
+			up.opDone(req.claim)
+
+		case req := <-chBound:
+			// delete unbound media for transaction
+			toDel := req.bind.unbound
+			for nm := range toDel {
+				if err := up.removeMedia(toDel[nm]); err != nil {
+					up.errorLog.Print(err.Error())
+				}
 			}
 
 		case req := <-chCancel:
@@ -977,7 +1018,8 @@ func (up *Uploader) worker(
 			if err := up.removeOrphan(req); err != nil {
 				up.errorLog.Print(err.Error())
 			}
-	
+
+			
 		case <-chDone:
 			// ## do something to finish other pending requests
 			return

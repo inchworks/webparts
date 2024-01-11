@@ -23,34 +23,6 @@ func (u *Users) UserDisplayName(userId int64) string {
 	return r.Name
 }
 
-// canSignup checks if the specified username can sign up. Returns the user's record.
-func (u *Users) canSignup(username string) (*User, error) {
-
-	// serialisation
-	defer u.App.Serialise(false)()
-
-	user, err := u.Store.GetNamed(username)
-	if err != nil {
-		return nil, errors.New("Not recognised. Ask us for an invitation.")
-	}
-
-	switch user.Status {
-	case UserKnown:
-		// OK
-
-	case UserActive:
-		return nil, errors.New("Already signed up. You can log in.")
-
-	case UserSuspended:
-		return nil, errors.New("Access suspended. Contact us.")
-
-	default:
-		panic("Unknown user status")
-	}
-
-	return user, nil
-}
-
 // forEditUsers returns data to edit users in a form.
 func (u *Users) forEditUsers(token string) *UsersForm {
 
@@ -156,14 +128,34 @@ func (ua *Users) onEditUsers(usSrc []*UserFormData) etx.TxId {
 // onUserSignup processes a sigup request.
 //
 // #### Assumes serialisation started earlier
-func (u *Users) onUserSignup(user *User, name string, password string) error {
+func (u *Users) onUserSignup(username string, displayName string, password string) error {
 
 	// serialisation
-	// #### should serialise from call to CanSignup
 	defer u.App.Serialise(true)()
 
+	// check if username known here
+	// We don't record the username, in case it is a mistake by a legitimate user.
+	user, err := u.Store.GetNamed(username)
+	if err != nil {
+		return errors.New("Not recognised. Ask us for an invitation.")
+	}
+
+	switch user.Status {
+	case UserKnown:
+		// OK
+
+	case UserActive:
+		return errors.New("Already signed up. You can log in.")
+
+	case UserSuspended:
+		return errors.New("Access suspended. Contact us.")
+
+	default:
+		panic("Unknown user status")
+	}
+
 	// set details for active user
-	user.Name = name
+	user.Name = displayName
 	user.SetPassword(password) // encrypted password
 	user.Status = UserActive
 	user.Created = time.Now()

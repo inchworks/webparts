@@ -84,30 +84,22 @@ func (u *Users) PostFormSignup(w http.ResponseWriter, r *http.Request) {
 	f.MinLength("password", 10)
 	f.MaxLength("password", 60)
 
-	// check if username known here
-	// We don't record the username, in case it is a mistake by a legitimate user.
-	username := f.Get("username")
-	user, err := u.canSignup(username)
-	if err != nil {
-
-		app.LogThreat("signup error", r)
-		f.Errors.Add("username", err.Error())
-	}
-
 	// If there are any errors, redisplay the signup form.
 	if !f.Valid() {
 		app.Render(w, r, "user-signup.page.tmpl", f)
 		return
 	}
-
-	// add user
-	err = u.onUserSignup(user, f.Get("displayName"), f.Get("password"))
-	if err == nil {
+	
+	// check and add user
+	err = u.onUserSignup(f.Get("username"), f.Get("displayName"), f.Get("password"))
+	if err != nil {
+		app.LogThreat("signup error", r)
+		f.Errors.Add("username", err.Error())
+		app.Render(w, r, "user-signup.page.tmpl", f)
+	} else {
 		app.Flash(r, "Your sign-up was successful. Please log in.")
 
 		http.Redirect(w, r, "/user/login", http.StatusSeeOther)
-	} else {
-		u.clientError(w, http.StatusBadRequest)
 	}
 }
 
