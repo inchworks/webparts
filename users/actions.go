@@ -126,8 +126,6 @@ func (ua *Users) onEditUsers(usSrc []*UserFormData) etx.TxId {
 }
 
 // onUserSignup processes a sigup request.
-//
-// #### Assumes serialisation started earlier
 func (u *Users) onUserSignup(username string, displayName string, password string) error {
 
 	// serialisation

@@ -32,7 +32,7 @@
 // Any media files uploaded but not referenced are deleted.
 //
 // Uploader also provides support for delayed deletion of media files belonging to parent object.
-// In single database transaction,call tx.Begin to start an extended transaction,
+// In single database transaction, call tx.Begin to start an extended transaction,
 // call Delete for each media file referenced, delete the object and commit the deletion to the database.
 //
 // ### Check that this is sufficient, and done.
@@ -48,11 +48,7 @@
 // Or a caller might store both previous and new file names, and continue to show previous images until step 5.
 // Uploader will not delete old files until all new file processing is completed.
 //
-// ### Needs support to recognise temporary files and provide images/thumbnails?
-
-// ### Issue: what if an image is referenced twice by the parent, and one reference is removed. -> Caller's problem.
-
-// ### Issue: what if client sends an upload after submitting the form. Can it be recognised for error and deletion?
+// ## Issue: what if client sends an upload after submitting the form. Can it be recognised for error and deletion?
 
 package uploader
 
@@ -166,11 +162,6 @@ type reqBound struct {
 // DB is an interface to the database manager that handles parent transactions.
 type DB interface {
 	Begin() func() // start transaction and return commit function
-}
-
-// ### do something to handle different media types with same name, or replace with a string
-type fileVersion struct {
-	fileName string
 }
 
 // WebFiles are the package's web resources (templates and static files)
@@ -308,10 +299,10 @@ func (up *Uploader) Begin() (string, error) {
 // NameFromFile returns the transaction ID and media file name from a file name.
 func NameFromFile(fileName string) (string, string) {
 	if len(fileName) > 0 {
-		// sf[0] is "P"
-		sf := strings.SplitN(fileName, "-", 3)
+		// sf[0] is "P" or "T", and sf[2] is an upload version
+		sf := strings.SplitN(fileName, "-", 4)
 
-		return sf[1], sf[2]
+		return sf[1], sf[3]
 
 	} else {
 		return "", ""
@@ -319,10 +310,13 @@ func NameFromFile(fileName string) (string, string) {
 }
 
 // STEP 2 : when AJAX request received to upload file. Call Save with the transaction code.
-// #### Filenames must be unique within the transaction, so that later deletion of one reference does not invalidate other references.
+
+// An upload version is specified to make filenames unique within the transaction,
+// so that later deletion of one reference does not invalidate other references. It also
+// distinguishes files of different types but with the same name.
 
 // Save creates a temporary copy of an uploaded file, to be processed later.
-func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId) (err error, byClient bool) {
+func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId, version int) (err error, byClient bool) {
 
 	// get image from request header
 	file, err := fh.Open()
@@ -339,7 +333,7 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId) (err error, byCl
 	}
 
 	// save temporary file
-	fn := fileFromNameNew("T", tx, name)
+	fn := fileFromNameNew("T", tx, version, name)
 	path := filepath.Join(up.FilePath, fn)
 	temp, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0666)
 	if err != nil {
@@ -390,8 +384,8 @@ func CleanName(name string) string {
 }
 
 // FileFromName returns the stored file name for a newly uploaded file.
-func FileFromName(id etx.TxId, name string) string {
-	return fileFromNameNew("T", id, name)
+func FileFromName(id etx.TxId, version int, name string) string {
+	return fileFromNameNew("T", id, version, name)
 }
 
 // MediaType returns the media type. It is 0 if not accepted.
@@ -447,8 +441,6 @@ func (up *Uploader) Delete(tx etx.TxId, filename string) error {
 //
 // (iii) Call Bind.End and specify a function to be called when all uploader processing has been done.
 // Any files uploaded and not referenced will be deleted.
-//
-// ### Could be a single function? Unless we need to report bad files?
 
 // StartClaim prepares for the client to identify the files it references.
 func (up *Uploader) StartClaim(tx etx.TxId) *Claim {
@@ -595,6 +587,18 @@ func (b *Bind) End() error {
 
 // DISPLAY MEDIA FILES
 
+// Working returns the processed status for an image.
+// 0 = no file, 1 = processing, 100 = ready. Percent processed and errors may be implemented in future.
+func Status(filename string) int {
+	if filename == "" {
+		return 0
+	} else if filename[0] == 'T' {
+		return 1
+	} else {
+		return 100
+	}
+}
+
 // Thumbnail returns the prefixed name for a thumbnail.
 func Thumbnail(filename string) string {
 
@@ -667,12 +671,11 @@ func copyStatic(toDir, name string, fromFS fs.FS, path string) error {
 }
 
 // fileFromNameNew returns a stored file name from a user's name for a newly uploaded file.
-// The owner is a transaction code, because the parent object may not exist yet.
 // The prefix is "T" for a temporary file, and "P" for the permanent one.
 // It has no revision number, so it doesn't overwrite a previous copy yet.
-func fileFromNameNew(prefix string, id etx.TxId, name string) string {
+func fileFromNameNew(prefix string, id etx.TxId, version int, name string) string {
 	if name != "" {
-		return fmt.Sprintf("%s-%s-%s", prefix, etx.String(id), name)
+		return fmt.Sprintf("%s-%s-%x-%s", prefix, etx.String(id), version, name)
 	} else {
 		return ""
 	}
@@ -680,7 +683,7 @@ func fileFromNameNew(prefix string, id etx.TxId, name string) string {
 
 // fileFromNameRev returns a stored file name from a user's name for a saved media file.
 // Once the parent update has been saved, the owner is the parent ID and the name has a revision number.
-func fileFromNameRev(ownerId int64, name string, rev int) string {
+func fileFromNameRev0(ownerId int64, name string, rev int) string {
 	if name != "" {
 		return fmt.Sprintf("P-%s$%s-%s",
 			strconv.FormatInt(ownerId, 36),
@@ -740,32 +743,6 @@ func getType(name string, audioTypes []string, videoTypes []string) (mediaType i
 	return
 }
 
-// globVersions finds versions of new or existing files.
-func (up *Uploader) globVersions(pattern string) map[string]fileVersion {
-
-	versions := make(map[string]fileVersion)
-
-	newFiles, _ := filepath.Glob(pattern)
-	for _, newFile := range newFiles {
-
-		fileName := filepath.Base(newFile)
-		_, name := NameFromFile(fileName)
-
-		// normalise name (earlier implementations stored .jpeg as well as .jpg)
-		name = strings.ToLower(name)
-		if filepath.Ext(name) == ".jpeg" {
-			name = changeExt(name, ".jpg")
-		}
-
-		// index case-blind
-		versions[strings.ToLower(name)] = fileVersion{
-			fileName: fileName,
-		}
-	}
-
-	return versions
-}
-
 // opDone decrements the count of in-progress uploads, and requests the next operation when ready.
 func (up *Uploader) opDone(c *Claim) {
 
@@ -808,12 +785,11 @@ func (up *Uploader) removeOrphan(req OpDelete) error {
 func (up *Uploader) removeOrphans(id etx.OpId) error {
 
 	// all files for transaction
-	// ### still globVersions and not just Glob?
 	tn := etx.String(etx.Transaction(id))
-	files := up.globVersions(filepath.Join(up.FilePath, "?-"+tn+"-*"))
+	files, _ := filepath.Glob(filepath.Join(up.FilePath, "?-"+tn+"-*"))
 
 	for _, f := range files {
-		if err := up.removeMedia(f.fileName); err != nil {
+		if err := up.removeMedia(f); err != nil {
 			up.errorLog.Print(err.Error())
 		}
 	}
@@ -941,14 +917,14 @@ func (up *Uploader) saveThumbnail(img image.Image, to string) error {
 }
 
 // saveVersion saves a new file with a revision number.
-func (up *Uploader) saveVersion(parentId int64, tx etx.TxId, name string, rev int) (string, error) {
+func (up *Uploader) saveVersion0(parentId int64, tx etx.TxId, name string, rev int) (string, error) {
 
 	// Link the file, rather than rename it, so the current version of the parent continues to work.
 	// We'll remove the old name once the parent update has been committed.
 
 	// the file should already be saved without a revision number
-	uploaded := fileFromNameNew("P", tx, name)
-	revised := fileFromNameRev(parentId, name, rev)
+	uploaded := fileFromNameNew("P", tx, 0, name)
+	revised := fileFromNameRev0(parentId, name, rev)
 
 	// main image ..
 	uploadedPath := filepath.Join(up.FilePath, uploaded)

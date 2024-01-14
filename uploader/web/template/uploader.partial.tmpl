@@ -1,5 +1,6 @@
 {{define "uploader"}}
     <input type='hidden' class="mediaName" name='mediaName' value='{{.MediaName}}'>
+    <input type='hidden' class="mediaVersion" name='mediaVersion' value='0'>
     <div class="input-group">
         <span class='input-group-text upload-name'>{{.MediaName}}</span>
         <label class='form-control upload-text {{.ChildValid "mediaName"}}' for='U{{ .ChildIndex }}' role='button'>{{ .Prompt }}</label>

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // App is the interface to functions provided by the parent application.
@@ -199,7 +200,7 @@ func (tm *TM) Forget(tx TxId, rm RM, opType int) error {
 
 // Id returns a transaction identifier from its string representation.
 func Id(s string) (TxId, error) {
-	id, err := strconv.ParseInt(s, 36, 64)
+	id, err := strconv.ParseInt(reverse(s), 36, 64)
 	return TxId(id), err
 }
 
@@ -254,9 +255,10 @@ func (tm *TM) Recover(mgrs ...RM) error {
 	return nil
 }
 
-// String formats a transaction number.
+// String returns a formatted a transaction number.
+// The string is reversed so that file names contructed from ID do not look similar.
 func String(tx TxId) string {
-	return strconv.FormatInt(int64(tx), 36)
+	return reverse(strconv.FormatInt(int64(tx), 36))
 }
 
 // Timestamp returns the start time of an extended transaction.
@@ -420,6 +422,23 @@ func idOp(tx TxId, nOp int) OpId {
 // idTx constructs an extended transaction ID from a time in nS.
 func idTx(t int64) TxId {
 	return TxId(t - t&(1<<10-1)) // remove low 9 bits
+}
+
+// reverse returns the characters of a string in reverse order.
+// It is not suitable for strings that include combining characters.
+func reverse(s string) string {
+
+	// Copied from rmuller's solution in
+	// https://stackoverflow.com/questions/1752414/how-to-reverse-a-string-in-go/34521190#34521190
+
+	size := len(s)
+	buf := make([]byte, size)
+	for start := 0; start < size; {
+		r, n := utf8.DecodeRuneInString(s[start:])
+		start += n
+		utf8.EncodeRune(buf[size-start:], r)
+	}
+	return string(buf)
 }
 
 // saveOp adds an operation to the cached list. It returns the number of operations.

@@ -5,6 +5,7 @@ package etx
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 )
 
@@ -101,4 +102,9 @@ func (tm *TM) SetNext(id TxId, rm RM, opType int, op Op) error {
 
 	_, err := tm.AddNext(id, rm, opType, op)
 	return err
+}
+
+// String returns a formatted a transaction number, for names that were not reversed.
+func StringV1(tx TxId) string {
+	return strconv.FormatInt(int64(tx), 36)
 }

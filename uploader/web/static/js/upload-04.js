@@ -2,12 +2,15 @@
 
 // Client-side functions to upload media files (audio, images and videos).
 
+var nextVersion = 1;
+
 // Upload file specified for uploading.
 function uploadFile($inp, token, maxUpload, timestamp, $btnSubmit) {
 
     var fileName = $inp.val().split("\\").pop();
     var file = $inp[0].files[0];
     var $slide = $inp.closest(".childForm")
+    var $media = $inp.closest(".media")
 
     // disable submit button
     $btnSubmit.prop("disabled", true);
@@ -15,8 +18,9 @@ function uploadFile($inp, token, maxUpload, timestamp, $btnSubmit) {
     // show file name in form entry, as confirmation to user ..
     $inp.siblings(".upload-text").addClass("selected").html(fileName);
 
-    // set file name in hidden field, so we can match the image to the slide
-    $inp.closest(".media").children(".mediaName").val(fileName);
+    // set file name and version in hidden fields, so we can match the image to the slide
+    $media.children(".mediaName").val(fileName);
+    $media.children(".mediaVersion").val(nextVersion);
 
     // clear previous status
     reset($slide);
@@ -35,6 +39,7 @@ function uploadFile($inp, token, maxUpload, timestamp, $btnSubmit) {
     var fd = new FormData();
     fd.append('csrf_token', token);
     fd.append('timestamp', timestamp);
+    fd.append('version', nextVersion++);
     fd.append('media', file);
 
     $.ajax({

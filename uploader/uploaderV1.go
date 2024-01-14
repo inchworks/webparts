@@ -13,15 +13,17 @@ import (
 
 // Processing for any V1 ETX operations, remaining before the server upgrade.
 //
-// There were two problems with the V1 design.
-// Firstly, it didn't allow for cached web pages referencing recently deleted or replaced media files.
-// The V2 design defers the removal of media files for a specified duration.
-// Secondly, a media file upload was not actualy committed on disk until after it had been processed,
-// so that a server restart could cause it to be lost after the user believed it had been uploaded
-// successfully. This was not a significant problem for image files, but videos can take minutes to
-// process.
-// The improvements in turn required an upgrade ETX, so that it could managed the recovery of
-// a larger number or operations without overloading the memory of a small server.
+// There were three problems with the V1 design.
+// (1) It didn't allow for cached web pages referencing recently deleted or replaced media files.
+//     The V2 design defers the removal of media files for a specified duration.
+// (2) A media file upload was not actually committed on disk until after it had been processed,
+//     so that a server restart could cause it to be lost after the user believed it had been uploaded
+//     successfully. This was not a significant problem for image files, but videos can take minutes to
+//     process.
+// (3) Uploading media files faster than they could be processed could overload the memory of a small server.
+//
+// The improvements in turn required an upgrade to ETX, so that it could manage the recovery of
+// a larger number of operations without overloading the memory of a small server.
 
 // V1 requests the uploader to handle V1 extended transactions.
 func (up *Uploader) V1() {
@@ -40,11 +42,11 @@ func (up *Uploader) StartClaimV1(tx etx.TxId) *Claim {
 	}
 
 	// list all files for this transaction
-	txCode := etx.String(tx)
-	uploads := up.globVersions(filepath.Join(up.FilePath, "P-"+txCode+"-*"))
+	txCode := etx.StringV1(tx)
+	uploads, _ := filepath.Glob(filepath.Join(up.FilePath, "P-"+txCode+"-*"))
 
-	for _, fv := range uploads {
-		c.unclaimed[fv.fileName] = true
+	for _, f := range uploads {
+		c.unclaimed[f] = true
 	}
 
 	return c
