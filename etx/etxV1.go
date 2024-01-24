@@ -46,7 +46,7 @@ func (tm *TM) RecoverV1(store RedoStoreV1, mgrs ...RM) error {
 	ts := tm.storeV1.All()
 	for _, t := range ts {
 		// note last V1 operation, so we can recognise their IDs
-		tm.maxV1 = OpId(t.Id)
+		tm.maxV1 = TxId(t.Id)
 
 		// RM and operation
 		rm := rms[t.Manager]
@@ -59,7 +59,7 @@ func (tm *TM) RecoverV1(store RedoStoreV1, mgrs ...RM) error {
 		}
 
 		// redo operation
-		rm.Operation(OpId(t.Id), t.OpType, op)
+		rm.Operation(TxId(t.Id), t.OpType, op)
 	}
 
 	return nil
@@ -80,7 +80,7 @@ func (tm *TM) TimeoutV1(rm RM, opType int, before time.Time) error {
 			}
 
 			// do operation
-			rm.Operation(OpId(t.Id), t.OpType, op)
+			rm.Operation(TxId(t.Id), t.OpType, op)
 		}
 	}
 	return nil
@@ -88,8 +88,7 @@ func (tm *TM) TimeoutV1(rm RM, opType int, before time.Time) error {
 
 // Deprecated from V1 as a misleading name. Use the equivalent TM.AddNext instead.
 func (tm *TM) BeginNext(first TxId, rm RM, opType int, op Op) error {
-	_, err := tm.AddNext(first, rm, opType, op)
-	return err
+	return tm.AddNext(first, rm, opType, op)
 }
 
 // Deprecated from V1 as a misleading name. Use the equivalent TM.Do instead.
@@ -100,8 +99,7 @@ func (tm *TM) DoNext(id TxId) {
 // Deprecated from V1 as too general. Use TM.AddNext in most cases, with TM.Forget+TM.AddNext to modify an existing operation.
 func (tm *TM) SetNext(id TxId, rm RM, opType int, op Op) error {
 
-	_, err := tm.AddNext(id, rm, opType, op)
-	return err
+	return tm.AddNext(id, rm, opType, op)
 }
 
 // String returns a formatted a transaction number, for names that were not reversed.

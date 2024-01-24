@@ -64,7 +64,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -107,14 +106,10 @@ type Uploader struct {
 	chDone    chan bool
 	chSave    chan reqSave
 	chClaimed chan reqClaimed
-	chBound   chan reqBound
-	chCancel  chan OpCancel
-	chDelete  chan OpDelete
 
 	// worker for V1 operations
-	chDoneV1    chan bool
+	chDoneV1 chan bool
 	tick     *time.Ticker
-
 
 	// separate worker for video processing
 	chVideosDone chan bool
@@ -174,16 +169,15 @@ var WebFiles embed.FS
 // Operation types
 // Non-zero so we can select them by etx.Timeout.
 const (
-	OpCancelType = iota + 1
+	OpOrphansV1Type = 0
+	OpCancelType    = iota + 1
 	OpDeleteType
 )
 
 type OpCancel struct {
-	opId etx.OpId
 }
 
 type OpDelete struct {
-	opId   etx.OpId
 	Name string
 }
 
@@ -193,7 +187,7 @@ func (up *Uploader) Name() string {
 
 func (up *Uploader) ForOperation(opType int) etx.Op {
 	switch opType {
-	case OpCancelType:
+	case OpOrphansV1Type, OpCancelType:
 		return &OpCancel{}
 	case OpDeleteType:
 		return &OpDelete{}
@@ -204,17 +198,21 @@ func (up *Uploader) ForOperation(opType int) etx.Op {
 }
 
 // Do operation requested via TM.
-func (up *Uploader) Operation(id etx.OpId, opType int, op etx.Op) {
+func (up *Uploader) Operation(id etx.TxId, opType int, op etx.Op) {
 
 	// send the request to the worker
 	switch req := op.(type) {
 	case *OpCancel:
-		req.opId = id
-		up.chCancel <- *req
+		// delete all media for an abandoned transaction
+		if err := up.removeOrphans(id); err != nil {
+			up.errorLog.Print(err.Error())
+		}
 
 	case *OpDelete:
-		req.opId = id
-		up.chDelete <- *req
+		// delete a media file
+		if err := up.removeOrphan(id, req.Name); err != nil {
+			up.errorLog.Print(err.Error())
+		}
 
 	default:
 		up.errorLog.Print("Unknown TX operation")
@@ -244,19 +242,16 @@ func (up *Uploader) Initialise(log *log.Logger, db DB, tm *etx.TM) {
 
 	// channels for background worker
 	up.chDone = make(chan bool, 1)
-	up.chSave = make(chan reqSave, 16)
+	up.chSave = make(chan reqSave, 64)
 	up.chClaimed = make(chan reqClaimed, 4)
-	up.chBound = make(chan reqBound, 4)
-	up.chCancel = make(chan OpCancel, 4)
-	up.chDelete = make(chan OpDelete, 4)
 
 	// start background worker
-	go up.worker(up.chSave, up.chClaimed, up.chBound, up.chCancel, up.chDelete, up.chDone)
+	go up.worker(up.chSave, up.chClaimed, 	up.chDone)
 
 	// separate worker for video processing
 	up.chVideosDone = make(chan bool, 1)
 	if up.VideoPackage != "" {
-		up.chConvert = make(chan reqSave, 20)
+		up.chConvert = make(chan reqSave, 16)
 		go up.avWorker(up.chConvert, up.chDone)
 	} else {
 		up.SnapshotAt = -1 // no snapshots
@@ -288,12 +283,11 @@ func (up *Uploader) Begin() (string, error) {
 	txId := up.tm.Begin()
 
 	// add operation to remove all files, if the update is abandoned
-	opId, err := up.tm.AddTimed(txId, up, OpCancelType, &OpCancel{}, up.MaxAge)
-	if err != nil {
+	if err := up.tm.AddTimed(txId, up, OpCancelType, &OpCancel{}, up.MaxAge); err != nil {
 		return "", err
 	}
 
-	return etx.String(etx.Transaction(opId)), nil
+	return etx.String(txId), nil
 }
 
 // NameFromFile returns the transaction ID and media file name from a file name.
@@ -425,7 +419,7 @@ func (up *Uploader) Delete(tx etx.TxId, filename string) error {
 		return nil
 	}
 
-	if _, err := up.tm.AddTimed(tx, up, 0, &OpDelete{Name: filename}, up.DeleteAfter); err != nil {
+	if err := up.tm.AddTimed(tx, up, OpDeleteType, &OpDelete{Name: filename}, up.DeleteAfter); err != nil {
 		return err
 	}
 
@@ -488,7 +482,7 @@ func (c *Claim) File(name string) {
 	}
 }
 
-// End requests notification when uploads are done. Any unclaimed temporarary files are deleted.
+// End requests notification when uploads are done. Any unclaimed temporary files are deleted.
 func (c *Claim) End(fn Uploaded) {
 
 	up := c.up
@@ -526,8 +520,7 @@ func (up *Uploader) StartBind(tx etx.TxId) *Bind {
 		up:       up,
 		tx:       tx,
 		prefixTx: prefixTx,
-		unbound: make(map[string]string, 4),
-
+		unbound:  make(map[string]string, 4),
 	}
 
 	// list all processed files (extensions may have changed)
@@ -573,15 +566,18 @@ func (b *Bind) File(fileName string) (string, error) {
 // End completes the linking a parent object, and deletes any files for the transaction that are not required.
 func (b *Bind) End() error {
 
-	// delete any unclaimed files
+	// delete unbound media for transaction
 	// We can't do file deletion sooner, because additional files may become unused after an overlapping transactions.
 	// requested even if there are none, so caller always gets an asyncronous notification
 	// (can't notify synchronously because caller probably holds database locks)
-	b.up.chBound <- reqBound{
-		bind: b,
+	toDel := b.unbound
+	for nm := range toDel {
+		if err := b.up.removeMedia(toDel[nm]); err != nil {
+			b.up.errorLog.Print(err.Error())
+		}
 	}
 
-	// ## keep status future implementation with error reporting.
+	// ## keep status for future implementation with error reporting.
 	return nil
 }
 
@@ -681,19 +677,6 @@ func fileFromNameNew(prefix string, id etx.TxId, version int, name string) strin
 	}
 }
 
-// fileFromNameRev returns a stored file name from a user's name for a saved media file.
-// Once the parent update has been saved, the owner is the parent ID and the name has a revision number.
-func fileFromNameRev0(ownerId int64, name string, rev int) string {
-	if name != "" {
-		return fmt.Sprintf("P-%s$%s-%s",
-			strconv.FormatInt(ownerId, 36),
-			strconv.FormatInt(int64(rev), 36),
-			name)
-	} else {
-		return ""
-	}
-}
-
 // getType returns the mediaType and normalised file extension, and indicates if it needs conversion.
 // A blank name is returned for an unsupported format.
 func getType(name string, audioTypes []string, videoTypes []string) (mediaType int, ext string, convert bool) {
@@ -767,10 +750,9 @@ func (up *Uploader) opDone(c *Claim) {
 }
 
 // removeMedia unlinks an image file and the corresponding thumbnail.
-// (If this is the sole link, the file is deleted.)
-func (up *Uploader) removeOrphan(req OpDelete) error {
+func (up *Uploader) removeOrphan(tx etx.TxId, name string) error {
 
-	if err := up.removeMedia(req.Name); err != nil {
+	if err := up.removeMedia(name); err != nil {
 		up.errorLog.Print(err.Error())
 	}
 
@@ -778,14 +760,14 @@ func (up *Uploader) removeOrphan(req OpDelete) error {
 	defer up.db.Begin()()
 
 	// end operation
-	return up.tm.End(req.opId)
+	return up.tm.End(tx)
 }
 
 // removeOrphans deletes all files for an abandoned transaction.
-func (up *Uploader) removeOrphans(id etx.OpId) error {
+func (up *Uploader) removeOrphans(id etx.TxId) error {
 
 	// all files for transaction
-	tn := etx.String(etx.Transaction(id))
+	tn := etx.String(id)
 	files, _ := filepath.Glob(filepath.Join(up.FilePath, "?-"+tn+"-*"))
 
 	for _, f := range files {
@@ -869,12 +851,16 @@ func (up *Uploader) saveImage(req reqSave) error {
 
 	} else {
 
+		// make smaller image and delete original
 		// ## Could set compression option, or sharpen, but how much?
 		resized := imaging.Fit(img, up.MaxW, up.MaxH, imaging.Lanczos)
 		runtime.Gosched()
 
 		if err := imaging.Save(resized, toPath); err != nil {
 			return err // ## could be a bad name?
+		}
+		if err := os.Remove(fromPath); err != nil {
+			return err
 		}
 	}
 
@@ -916,39 +902,10 @@ func (up *Uploader) saveThumbnail(img image.Image, to string) error {
 	return imaging.Save(thumbnail, to)
 }
 
-// saveVersion saves a new file with a revision number.
-func (up *Uploader) saveVersion0(parentId int64, tx etx.TxId, name string, rev int) (string, error) {
-
-	// Link the file, rather than rename it, so the current version of the parent continues to work.
-	// We'll remove the old name once the parent update has been committed.
-
-	// the file should already be saved without a revision number
-	uploaded := fileFromNameNew("P", tx, 0, name)
-	revised := fileFromNameRev0(parentId, name, rev)
-
-	// main image ..
-	uploadedPath := filepath.Join(up.FilePath, uploaded)
-	revisedPath := filepath.Join(up.FilePath, revised)
-	if err := os.Link(uploadedPath, revisedPath); err != nil {
-		return revised, err
-	}
-
-	// .. and thumbnail
-	uploadedPath = filepath.Join(up.FilePath, Thumbnail(uploaded))
-	revisedPath = filepath.Join(up.FilePath, Thumbnail(revised))
-	err := os.Link(uploadedPath, revisedPath)
-
-	// rename with a revision number
-	return revised, err
-}
-
 // worker does background processing for media.
 func (up *Uploader) worker(
 	chSave <-chan reqSave,
 	chClaimed <-chan reqClaimed,
-	chBound <-chan reqBound,
-	chCancel <-chan OpCancel,
-	chDelete <-chan OpDelete,
 	chDone <-chan bool) {
 
 	for {
@@ -971,30 +928,8 @@ func (up *Uploader) worker(
 				}
 			}
 
-			// notify that all uploaded files have been claimed
+			// notify that all uploaded files have been processed
 			up.opDone(req.claim)
-
-		case req := <-chBound:
-			// delete unbound media for transaction
-			toDel := req.bind.unbound
-			for nm := range toDel {
-				if err := up.removeMedia(toDel[nm]); err != nil {
-					up.errorLog.Print(err.Error())
-				}
-			}
-
-		case req := <-chCancel:
-			// delete all media for an abandoned transaction
-			if err := up.removeOrphans(req.opId); err != nil {
-				up.errorLog.Print(err.Error())
-			}
-
-		case req := <-chDelete:
-			// delete a media file
-			if err := up.removeOrphan(req); err != nil {
-				up.errorLog.Print(err.Error())
-			}
-
 			
 		case <-chDone:
 			// ## do something to finish other pending requests
