@@ -96,18 +96,18 @@ type etxOps struct {
 	active    bool  // operation not ended
 	sorted    bool  // timed operations sorted in due order
 	current   int  // operation, -1 if not started
-	immediate []*nextOp
-	timed     []*nextOp
+	immediate []*etxOp
+	timed     []*etxOp
 }
 
-// nextOp caches the next operation for a transaction
-type nextOp struct {
+// etxOp caches an operation for a transaction
+type etxOp struct {
 	id     opId
 	rm     RM // set nil when operation is ended or forgotten
 	due    time.Time
 	tmType int
 	opType int
-	op     Op
+	op     Op // RM operation
 }
 
 // New initialises the transaction manager.
@@ -193,7 +193,7 @@ func (tm *TM) End(txId TxId) error {
 	etx.active = false // operation ended
 
 	// current operation
-	var ops []*nextOp
+	var ops []*etxOp
 	if etx.isTimed {
 		ops = etx.timed
 	} else {
@@ -259,23 +259,23 @@ func (tm *TM) Recover(mgrs ...RM) error {
 		if rm == nil {
 			return errors.New("Missing resource manager")
 		}
-		op := rm.ForOperation(r.OpType)
-		if err := json.Unmarshal(r.Operation, op); err != nil {
+		rmOp := rm.ForOperation(r.OpType)
+		if err := json.Unmarshal(r.Operation, rmOp); err != nil {
 			tm.mu.Unlock()
 			tm.app.Log(err)
 			continue
 		}
 		tx := TxId(r.Tx)
-		nxt := &nextOp{
+		tmOp := &etxOp{
 			id:     opId(r.Id),
 			rm:     rm,
 			due:    Timestamp(tx).Add(time.Second * time.Duration(r.Delay)),
 			tmType: r.RedoType,
 			opType: r.OpType,
-			op:     op,
+			op:     rmOp,
 		}
 
-		tm.saveOp(tx, nxt)
+		tm.saveOp(tx, tmOp)
 		tm.mu.Unlock()
 	}
 
@@ -305,23 +305,23 @@ func Timestamp(tx TxId) time.Time {
 
 // addOp adds a next or timed operation to an extended transaction.
 // delay is specified in seconds.
-func (tm *TM) addOp(tx TxId, rm RM, tmType int, delay int, opType int, op Op) error {
+func (tm *TM) addOp(tx TxId, rm RM, tmType int, delay int, opType int, rmOp Op) error {
 
-	nxt := &nextOp{
+	tmOp := &etxOp{
 		rm:     rm,
 		due:    Timestamp(tx).Add(time.Second * time.Duration(delay)),
 		tmType: tmType,
 		opType: opType,
-		op:     op,
+		op:     rmOp,
 	}
 
 	// SERIALISED
 	tm.mu.Lock()
 
-	tm.saveOp(tx, nxt)
+	tm.saveOp(tx, tmOp)
 
 	id := tm.newId()
-	nxt.id = opId(id)
+	tmOp.id = opId(id)
 
 	tm.mu.Unlock()
 
@@ -335,7 +335,7 @@ func (tm *TM) addOp(tx TxId, rm RM, tmType int, delay int, opType int, op Op) er
 		OpType:   opType,
 	}
 	var err error
-	r.Operation, err = json.Marshal(op)
+	r.Operation, err = json.Marshal(rmOp)
 	if err != nil {
 		return err
 	}
@@ -358,7 +358,7 @@ func (tm *TM) doNext(tx TxId, timed bool) bool {
 	}
 
 	// select type of operations
-	var ops []*nextOp
+	var ops []*etxOp
 	if timed {
 		if len(etx.immediate) > 0 {
 			// new immediate operation(s) have been added, give them priority
@@ -382,10 +382,10 @@ func (tm *TM) doNext(tx TxId, timed bool) bool {
 
 	next :=  etx.current + 1
 	if next < len(ops) {
-		op := ops[next]
+		tmOp := ops[next]
 		
 		// check operation time
-		if timed && op.due.After(time.Now()) {
+		if timed && tmOp.due.After(time.Now()) {
 			return false // next op is not due yet
 		}
 
@@ -394,12 +394,12 @@ func (tm *TM) doNext(tx TxId, timed bool) bool {
 		etx.isTimed = timed
 
 		// skip forgotten ops
-		if op.rm != nil {
+		if tmOp.rm != nil {
 			etx.active = true
 
 			// do operation
 			tm.mu.Unlock()
-			op.rm.Operation(tx, op.opType, op.op)
+			tmOp.rm.Operation(tx, tmOp.opType, tmOp.op)
 			tm.mu.Lock()
 
 			if etx.active {
@@ -422,7 +422,7 @@ func (tm *TM) doNext(tx TxId, timed bool) bool {
 }
 
 // forget discards operations of a specified type, either immediate or timed.
-func (tm *TM) forget(ops []*nextOp, rm RM, opType int) []*nextOp {
+func (tm *TM) forget(ops []*etxOp, rm RM, opType int) []*etxOp {
 
 	toDel := make([]opId, 0, 4)
 
@@ -434,18 +434,18 @@ func (tm *TM) forget(ops []*nextOp, rm RM, opType int) []*nextOp {
 
 	// scan slide from the end
 	for i := len(ops)-1; i >= 0; i-- {
-		opn := ops[i]
-		if opn.rm.Name() == name && opn.opType == opType {
+		tmOp := ops[i]
+		if tmOp.rm.Name() == name && tmOp.opType == opType {
 			if i == len(ops)-1 {
 				// trim the final element (a common case)
 				ops = ops[:len(ops)-1]
 			} else {
 				// disable in cache (quicker than shuffing the slice)
-				opn.rm = nil
+				tmOp.rm = nil
 			}
 
 			// delete after unlocking
-			toDel = append(toDel, opn.id) 
+			toDel = append(toDel, tmOp.id) 
 		}
 	}
 
@@ -491,21 +491,21 @@ func reverse(s string) string {
 }
 
 // saveOp adds an operation to the cached list.
-func (tm *TM) saveOp(tx TxId, nxt *nextOp) {
+func (tm *TM) saveOp(tx TxId, tmOp *etxOp) {
 
 	etx := tm.etxs[tx]
 	if etx == nil {
 		// new transaction
 		etx = &etxOps{
 			current: -1,
-			immediate: make([]*nextOp, 0, 4),
-			timed: make([]*nextOp, 0, 4),
+			immediate: make([]*etxOp, 0, 4),
+			timed: make([]*etxOp, 0, 4),
 		}
 	}
 
 	// choose map for immediate or timed operations
-	var ops *[]*nextOp
-	switch nxt.tmType {
+	var ops *[]*etxOp
+	switch tmOp.tmType {
 	case redoNext:
 		ops = &etx.immediate
 	case redoTimed:
@@ -516,7 +516,7 @@ func (tm *TM) saveOp(tx TxId, nxt *nextOp) {
 		return
 	}
 
-	*ops = append(*ops, nxt)
+	*ops = append(*ops, tmOp)
 }
 
 // worker executes delayed operations.

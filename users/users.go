@@ -28,10 +28,17 @@ type App interface {
 	// LogThreat optionally records a rejected request to sign-up or log-in
 	LogThreat(msg string, r *http.Request)
 
-	// OnAddUser is called to add any additional application data for a iser
+	// OnAddUser is called to add any additional application data for a user.
+	// It is called after the store request has been made.
+	OnAddUser(tx etx.TxId, user *User)
 
-	// OnRemoveUser is called to delete any application data for a user
+	// OnRemoveUser is called to delete any application data for a user.
+	// It is called before the store entry is deleted.
 	OnRemoveUser(tx etx.TxId, user *User)
+
+	// OnUpdateUser is called to do any application processing when a user is updated.
+	// It is called after the store request has been made.
+	OnUpdateUser(tx etx.TxId, from *User, to *User)
 
 	// Render writes an HTTP response using the specified template and template field Users
 	Render(w http.ResponseWriter, r *http.Request, template string, usersData interface{})

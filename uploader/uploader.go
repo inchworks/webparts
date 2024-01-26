@@ -35,8 +35,6 @@
 // In single database transaction, call tx.Begin to start an extended transaction,
 // call Delete for each media file referenced, delete the object and commit the deletion to the database.
 //
-// ### Check that this is sufficient, and done.
-//
 // Use Thumbnail to get the file name for a thumbnail image corresponding to a media file.
 //
 // Note that because files are labelled with a transaction ID,
@@ -528,7 +526,7 @@ func (up *Uploader) StartBind(tx etx.TxId) *Bind {
 
 	for _, f := range processed {
 		fn := filepath.Base(f)
-		nm := strings.TrimSuffix(fn, filepath.Ext(fn))
+		nm := stem(fn)
 		b.unbound[nm] = fn
 	}
 	return b
@@ -549,7 +547,7 @@ func (b *Bind) File(fileName string) (string, error) {
 	prefixTx, _ := cutN(fileName, '-', 2)
 
 	if prefixTx == b.prefixTx {
-		nm := strings.TrimSuffix(fileName, filepath.Ext(fileName)) // ### make this a function
+		nm := stem(fileName)
 
 		pnm := "P" + nm[1:]
 		newName := b.unbound[pnm] // new name and extension
@@ -618,7 +616,7 @@ func Thumbnail(filename string) string {
 
 // changeExt returns a file name with the specified extension.
 func changeExt(name string, ext string) string {
-	return strings.TrimSuffix(name, filepath.Ext(name)) + ext
+	return stem(name) + ext
 }
 
 // changePrefix returns a stored file name with a new prefix.
@@ -664,6 +662,19 @@ func copyStatic(toDir, name string, fromFS fs.FS, path string) error {
 		return err
 	}
 	return nil
+}
+
+// cutN returns two strings, before and after the Nth separator
+func cutN(s string, sep rune, n int) (string, string) {
+	for i, sep2 := range s {
+		if sep2 == sep {
+			n--
+			if n == 0 {
+				return s[:i], s[i+1:]
+			}
+		}
+	}
+	return s, ""
 }
 
 // fileFromNameNew returns a stored file name from a user's name for a newly uploaded file.
@@ -834,8 +845,10 @@ func (up *Uploader) saveImage(req reqSave) error {
 	}
 
 	// convert non-displayable file types to JPG
-	// ### handle unrecognised file types
 	toName, _, convert := changeType(req.name, []string{}, []string{})
+	if toName == "" {
+		return errors.New("uploader: Unsupported file " + req.name) // ## shouldn't get this far?
+	}
 	toName = changePrefix("P", toName)
 
 	// path for saved files
@@ -874,15 +887,15 @@ func (up *Uploader) saveImage(req reqSave) error {
 
 // saveMedia performs image or video processing, called from background worker.
 func (up *Uploader) saveMedia(req reqSave) error {
-	var done bool
+	var convert bool
 	var err error
 
 	mt := up.MediaType(req.name)
 	req.mediaType = mt
 	switch mt {
 	case MediaAudio, MediaVideo:
-		done, err = up.saveAV(req)
-		if done {
+		convert, err = up.saveAV(req)
+		if convert {
 			up.opDone(req.claim)
 		}
 		// otherwise, processing continued in AV worker
@@ -900,6 +913,11 @@ func (up *Uploader) saveThumbnail(img image.Image, to string) error {
 	// save thumbnail
 	thumbnail := imaging.Fit(img, up.ThumbW, up.ThumbH, imaging.Lanczos)
 	return imaging.Save(thumbnail, to)
+}
+
+// stem returns the filename without the extension.
+func stem(fn string) string {
+	return strings.TrimSuffix(fn, filepath.Ext(fn))
 }
 
 // worker does background processing for media.
@@ -936,17 +954,4 @@ func (up *Uploader) worker(
 			return
 		}
 	}
-}
-
-// cutN returns two strings, before and after the Nth separator
-func cutN(s string, sep rune, n int) (string, string) {
-	for i, sep2 := range s {
-		if sep2 == sep {
-			n--
-			if n == 0 {
-				return s[:i], s[i+1:]
-			}
-		}
-	}
-	return s, ""
 }

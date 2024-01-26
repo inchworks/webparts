@@ -84,6 +84,7 @@ func (ua *Users) onEditUsers(usSrc []*UserFormData) etx.TxId {
 				Password: []byte(""),
 			}
 			ua.Store.Update(&u)
+			ua.App.OnAddUser(tx, &u)
 			iSrc++
 
 		} else {
@@ -103,6 +104,7 @@ func (ua *Users) onEditUsers(usSrc []*UserFormData) etx.TxId {
 					uSrc.Role != uDest.Role ||
 					uSrc.Status != uDest.Status {
 
+					was := *uDest
 					uDest.Name = uSrc.DisplayName
 					uDest.Username = uSrc.Username
 					uDest.Role = uSrc.Role
@@ -110,6 +112,7 @@ func (ua *Users) onEditUsers(usSrc []*UserFormData) etx.TxId {
 					if err := ua.Store.Update(uDest); err != nil {
 						return 0 // unexpected database error
 					}
+					ua.App.OnUpdateUser(tx, &was, uDest)
 				}
 				iSrc++
 				iDest++

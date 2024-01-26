@@ -5,12 +5,12 @@ package uploader
 // Audio and video file processing.
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/disintegration/imaging"
@@ -120,30 +120,19 @@ func (up *Uploader) saveSnapshot(videoName string) error {
 	return err
 }
 
-// saveVideo saves the video file and a thumbnail. It returns true if no format conversion is needed.
+// saveVideo saves the video file and a thumbnail. It returns true if format conversion is needed.
 func (up *Uploader) saveAV(req reqSave) (bool, error) {
 
+	var err error
 	fromName := req.name
 
-	// add a snapshot thumbnail
-	var err error
-	switch req.mediaType {
-	case MediaAudio:
-		// add a dummy thumbnail
-		err = copyStatic(up.FilePath, Thumbnail(fromName), WebFiles, "web/static/audio.png")
-
-	case MediaVideo:
-		// ### better to do this from smaller file after conversion!
-		err = up.saveSnapshot(fromName)
-	}
-	if err != nil {
-		return true, err
-	}
-
 	// convert non-displayable AV formats, if we can
-	// ### handle unrecognised types
 	fromPath := filepath.Join(up.FilePath, fromName)
 	toName, toType, convert := changeType(req.name, up.AudioTypes, up.VideoTypes)
+	if toName == "" {
+		return false, errors.New("uploader: Unsupported file " + req.name) // ## shouldn't get this far?
+	}
+
 	if up.VideoPackage != "" {
 		if !convert {
 			// is file small enough to keep the original unprocessed?
@@ -157,21 +146,35 @@ func (up *Uploader) saveAV(req reqSave) (bool, error) {
 	if convert {
 		req.toType = toType
 		up.chConvert <- req
-		return false, nil
 
 	} else {
 		// rename to a permanent file
 		toName = changePrefix("P", toName)
-		err := os.Rename(fromPath, filepath.Join(up.FilePath, toName))
-		return true, err
+		if err = os.Rename(fromPath, filepath.Join(up.FilePath, toName)); err != nil {
+			return false, err
+		}
 	}
+
+	switch req.mediaType {
+	case MediaAudio:
+		// add a dummy thumbnail
+		err = copyStatic(up.FilePath, Thumbnail(fromName), WebFiles, "web/static/audio.png")
+
+	case MediaVideo:
+		// extract thumbnail from video (quicker to do after conversion)
+		if !convert {
+			err = up.saveSnapshot(fromName)
+		}
+	}
+
+	return convert, err
 }
 
 // frame generates a freeze frame image, and returns its path.
 func (up *Uploader) snapshot(fromName string, prefix string, after time.Duration) (string, error) {
 
 	// output file name
-	to := prefix + strings.TrimSuffix(fromName[1:], filepath.Ext(fromName)) + ".jpg"
+	to := prefix + stem(fromName[1:]) + ".jpg"
 	toPath := filepath.Join(up.FilePath, to)
 
 	// the snapshot may have already been created, if we are redoing the operations, and FFmpeg will not overwrite it
@@ -238,9 +241,15 @@ func (up *Uploader) avWorker(
 		select {
 		case req := <-chConvert:
 			// convert audio or video
-			if err := up.convertAV(req); err != nil {
+			err := up.convertAV(req)
+			if err == nil {
+				// extract snapshot from converted video
+				err = up.saveSnapshot(changeExt(req.name, req.toType))
+			}
+			if err != nil {
 				up.errorLog.Print(err.Error())
 			}
+
 			up.opDone(req.claim)
 
 		case <-done:
