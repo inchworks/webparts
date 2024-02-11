@@ -84,18 +84,18 @@ type TM struct {
 
 	// state
 	mu     sync.Mutex
-	// etx1   map[TxId][]*nextOp // delayed
 	etxs   map[TxId]*etxOps
 	lastId int64
 	maxV1  TxId // the last operation found in the V1 store
 }
+
+// ## This implementation is not efficient for transactions with hundreds or more of operations.
 
 // etxOps holds the state and caches the operations for a transaction
 type etxOps struct {
 	isTimed   bool // true when current or next operation is timed
 	active    bool  // operation not ended
 	sorted    bool  // timed operations sorted in due order
-	current   int  // operation, -1 if not started
 	immediate []*etxOp
 	timed     []*etxOp
 }
@@ -187,30 +187,21 @@ func (tm *TM) End(txId TxId) error {
 	if !exists {
 		return errors.New("etx: Invalid transaction ID")
 	}
-	if etx.current < 0 {
-		return errors.New("etx: No current operation")
-	}
 	etx.active = false // operation ended
 
 	// current operation
-	var ops []*etxOp
+	var id opId
+	var err error
 	if etx.isTimed {
-		ops = etx.timed
+		id, err = tm.end(&etx.timed)
 	} else {
-		ops = etx.immediate
+		id, err = tm.end(&etx.immediate)
 	}
-	if etx.current >= len(ops) {
-		return errors.New("etx: Operation already ended")
-	}
-	op := ops[etx.current]
-	opId := op.id
-
-	// forget this operation
-	op.rm = nil
 	tm.mu.Unlock()
-	err := tm.store.DeleteId(int64(opId))
-	if err != nil {
-		return err
+
+	// delete redo record
+	if err == nil {
+		err = tm.store.DeleteId(int64(id))
 	}
 
 	return err
@@ -360,29 +351,20 @@ func (tm *TM) doNext(tx TxId, timed bool) bool {
 	// select type of operations
 	var ops []*etxOp
 	if timed {
-		if len(etx.immediate) > 0 {
-			// new immediate operation(s) have been added, give them priority
-			etx.current = -1
-			timed = false
-			ops = etx.immediate
-		} else {
-			if !etx.sorted {
-				// stable sort is faster because items likely to be in order
-				sort.SliceStable(etx.timed, func(p, q int) bool {
-					return etx.timed[p].due.Before(etx.timed[q].due)
-				})
-				etx.sorted = true
-				etx.current = -1
-			}
-			ops = etx.timed
+		if !etx.sorted {
+			// stable sort is faster because items likely to be in order
+			sort.SliceStable(etx.timed, func(p, q int) bool {
+				return etx.timed[p].due.Before(etx.timed[q].due)
+			})
+			etx.sorted = true
 		}
+		ops = etx.timed
 	} else {
 		ops = etx.immediate
 	}
 
-	next :=  etx.current + 1
-	if next < len(ops) {
-		tmOp := ops[next]
+	if len(ops) > 0 {
+		tmOp := ops[0]
 		
 		// check operation time
 		if timed && tmOp.due.After(time.Now()) {
@@ -390,35 +372,45 @@ func (tm *TM) doNext(tx TxId, timed bool) bool {
 		}
 
 		// next operation
-		etx.current = next
 		etx.isTimed = timed
+		etx.active = true
 
-		// skip forgotten ops
-		if tmOp.rm != nil {
-			etx.active = true
+		// do operation
+		tm.mu.Unlock()
+		tmOp.rm.Operation(tx, tmOp.opType, tmOp.op)
+		tm.mu.Lock()
 
-			// do operation
-			tm.mu.Unlock()
-			tmOp.rm.Operation(tx, tmOp.opType, tmOp.op)
-			tm.mu.Lock()
-
-			if etx.active {
-				return false // asynchronous operation
-			}
+		if etx.active {
+			return false // asynchronous operation
 		}
-		next = next + 1
 	}
 
-	// delete list if there are no more ops
-	if next >= len(ops)  {
-		ops = nil
-	}
+	// delete transaction if there are no more ops
 	if len(etx.immediate) + len(etx.timed) == 0 {
 		delete(tm.etxs, tx)
 		return false
 	}
 
-	return true
+	// synchronous and more ops?
+	if timed {
+		return len(etx.timed) > 0
+	} else {
+		return len(etx.immediate) > 0
+	}
+}
+
+// end forgets the current operation (immediate or timed), and returns its redo record ID.
+func (tm *TM) end(ops *[]*etxOp) (opId, error) {
+
+	if len(*ops) == 0 {
+		return 0, errors.New("etx: Operation already ended")
+	}
+	opId := (*ops)[0].id
+
+	// forget this operation
+	*ops = (*ops)[1:]
+
+	return opId, nil
 }
 
 // forget discards operations of a specified type, either immediate or timed.
@@ -432,16 +424,16 @@ func (tm *TM) forget(ops []*etxOp, rm RM, opType int) []*etxOp {
 	// we can't compare interfaces
 	name := rm.Name()
 
-	// scan slide from the end
+	// scan operations from the end
 	for i := len(ops)-1; i >= 0; i-- {
 		tmOp := ops[i]
 		if tmOp.rm.Name() == name && tmOp.opType == opType {
 			if i == len(ops)-1 {
 				// trim the final element (a common case)
-				ops = ops[:len(ops)-1]
+				ops = ops[:i]
 			} else {
-				// disable in cache (quicker than shuffing the slice)
-				tmOp.rm = nil
+				// shuffle to remove operation
+				ops = append(ops[:i], ops[i+1:]...)
 			}
 
 			// delete after unlocking
@@ -497,10 +489,10 @@ func (tm *TM) saveOp(tx TxId, tmOp *etxOp) {
 	if etx == nil {
 		// new transaction
 		etx = &etxOps{
-			current: -1,
 			immediate: make([]*etxOp, 0, 4),
 			timed: make([]*etxOp, 0, 4),
 		}
+		tm.etxs[tx] = etx
 	}
 
 	// choose map for immediate or timed operations
@@ -509,7 +501,7 @@ func (tm *TM) saveOp(tx TxId, tmOp *etxOp) {
 	case redoNext:
 		ops = &etx.immediate
 	case redoTimed:
-		ops = &etx.immediate
+		ops = &etx.timed
 		etx.sorted = false
 	default:
 		tm.app.Log(errors.New("etx: Unknown RedoType"))
