@@ -16,42 +16,49 @@ import (
 	"github.com/disintegration/imaging"
 )
 
-// convert saves a media file in the specified type.
-func (up *Uploader) convert(req reqSave, toType string, arg ...string) error {
+// convert saves a media file in the specified type and returns the converted file name.
+func (up *Uploader) convert(req reqSave, toType string, outOpt ...string) (string, error) {
 
 	fromName := req.name
 	fromPath := filepath.Join(up.FilePath, fromName)
 
-	// the file may have already been converted, if we are redoing the operations
-	//  can this really be redone?
-	if exists, err := exists(fromPath); err != nil {
-		return err
-	} else if !exists {
-		return nil
-	}
-
 	// output file
-	toName := changePrefix("P", fromName)
+	toName := changePrefix("M", fromName)
 	toName = changeExt(toName, toType)
 
+	// the file may have already been converted, if we are redoing the operations
+	ok, err := exists(fromPath)
+	if err != nil {
+		return "", err // file system error
+	}
+	if !ok {
+		if ok, err = exists(filepath.Join(up.FilePath, toName)); err != nil {
+			return "", err  // unlikely file system error
+		}
+		if !ok {
+			return "", errors.New("Uploaded media file " + fromName + " missing")
+		} else {
+			return toName, nil // conversion already complete
+		}
+	}
+
 	// convert to specified type
-	// ## why 2 x -i ??
 	args := []string{
 		"-v", "error",
 		"-i", fromName}
-	args = append(args, arg...)
-	args = append(args, "-i", fromName, toName)
-	err := up.ffmpeg(arg...)
+	args = append(args, outOpt...)
+	args = append(args, toName)
+	err = up.ffmpeg(args...)
 
 	// remove original
 	if err == nil {
 		err = os.Remove(fromPath)
 	}
-	return err
+	return toName, err
 }
 
 // convertAV saves an audio or video file.
-func (up *Uploader) convertAV(req reqSave) error {
+func (up *Uploader) convertAV(req reqSave) (string, error) {
 
 	switch req.mediaType {
 	case MediaAudio:
@@ -66,7 +73,7 @@ func (up *Uploader) convertAV(req reqSave) error {
 			"-preset", "fast",
 			"-c:a", "aac")
 	}
-	return nil
+	return "", errors.New("Unsupported AV type")
 }
 
 // exists returns true if a file already exists
@@ -149,7 +156,7 @@ func (up *Uploader) saveAV(req reqSave) (bool, error) {
 
 	} else {
 		// rename to a permanent file
-		toName = changePrefix("P", toName)
+		toName = changePrefix("M", toName)
 		if err = os.Rename(fromPath, filepath.Join(up.FilePath, toName)); err != nil {
 			return false, err
 		}
@@ -163,7 +170,7 @@ func (up *Uploader) saveAV(req reqSave) (bool, error) {
 	case MediaVideo:
 		// extract thumbnail from video (quicker to do after conversion)
 		if !convert {
-			err = up.saveSnapshot(fromName)
+			err = up.saveSnapshot(toName)
 		}
 	}
 
@@ -241,10 +248,10 @@ func (up *Uploader) avWorker(
 		select {
 		case req := <-chConvert:
 			// convert audio or video
-			err := up.convertAV(req)
+			toName, err := up.convertAV(req)
 			if err == nil {
 				// extract snapshot from converted video
-				err = up.saveSnapshot(changeExt(req.name, req.toType))
+				err = up.saveSnapshot(changeExt(toName, req.toType))
 			}
 			if err != nil {
 				up.errorLog.Print(err.Error())

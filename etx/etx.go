@@ -94,8 +94,8 @@ type TM struct {
 // etxOps holds the state and caches the operations for a transaction
 type etxOps struct {
 	isTimed   bool // true when current or next operation is timed
-	active    bool  // operation not ended
-	sorted    bool  // timed operations sorted in due order
+	active    bool // operation not ended
+	sorted    bool // timed operations sorted in due order
 	immediate []*etxOp
 	timed     []*etxOp
 }
@@ -105,7 +105,6 @@ type etxOp struct {
 	id     opId
 	rm     RM // set nil when operation is ended or forgotten
 	due    time.Time
-	tmType int
 	opType int
 	op     Op // RM operation
 }
@@ -114,10 +113,10 @@ type etxOp struct {
 func New(app App, store RedoStore) *TM {
 
 	tm := &TM{
-		app:    app,
-		store:  store,
-		mu:     sync.Mutex{},
-		etxs:   make(map[TxId]*etxOps, 8),
+		app:   app,
+		store: store,
+		mu:    sync.Mutex{},
+		etxs:  make(map[TxId]*etxOps, 8),
 	}
 
 	// start background worker
@@ -164,11 +163,10 @@ func (tm *TM) AddTimed(tx TxId, rm RM, opType int, op Op, after time.Duration) e
 // It must be called after database changes have been committed.
 func (tm *TM) Do(tx TxId) error {
 
-	for {
-		if tm.doNext(tx, false) {
-			return nil // no more synchronous ops
-		}
-	}
+	for tm.doNext(tx, false) {
+	} // until no more synchronous ops
+
+	return nil
 }
 
 // End terminates and forgets the current operation.
@@ -215,7 +213,7 @@ func (tm *TM) Forget(tx TxId, rm RM, opType int) error {
 	if !exists {
 		return errors.New("etx: Invalid transaction ID")
 	}
-	
+
 	// remove from immediate and timed operations
 	etx.immediate = tm.forget(etx.immediate, rm, opType)
 	etx.timed = tm.forget(etx.timed, rm, opType)
@@ -232,6 +230,9 @@ func Id(s string) (TxId, error) {
 // Recover reads and processes the redo log, to complete interrupted transactions after a server restart.
 func (tm *TM) Recover(mgrs ...RM) error {
 
+	// SERIALISED
+	tm.mu.Lock()
+
 	// index resource managers by name
 	rms := make(map[string]RM, 2)
 	for _, rm := range mgrs {
@@ -242,12 +243,10 @@ func (tm *TM) Recover(mgrs ...RM) error {
 	rs := tm.store.All()
 	for _, r := range rs {
 
-		// SERIALISED ## unnecessary?
-		tm.mu.Lock()
-
 		// RM and operation
 		rm := rms[r.Manager]
 		if rm == nil {
+			tm.mu.Unlock()
 			return errors.New("Missing resource manager")
 		}
 		rmOp := rm.ForOperation(r.OpType)
@@ -261,22 +260,18 @@ func (tm *TM) Recover(mgrs ...RM) error {
 			id:     opId(r.Id),
 			rm:     rm,
 			due:    Timestamp(tx).Add(time.Second * time.Duration(r.Delay)),
-			tmType: r.RedoType,
 			opType: r.OpType,
 			op:     rmOp,
 		}
 
-		tm.saveOp(tx, tmOp)
-		tm.mu.Unlock()
+		tm.saveOp(tx, r.RedoType, tmOp)
 	}
+	tm.mu.Unlock()
 
 	// redo first immediate operation of each extended transaction
 	for tx := range tm.etxs {
-		for {
-			if tm.doNext(tx, false) {
-				break // no more synchronous ops
-			}
-		}	
+		for tm.doNext(tx, false) {
+		} // until no more synchronous ops
 	}
 
 	return nil
@@ -301,7 +296,6 @@ func (tm *TM) addOp(tx TxId, rm RM, tmType int, delay int, opType int, rmOp Op) 
 	tmOp := &etxOp{
 		rm:     rm,
 		due:    Timestamp(tx).Add(time.Second * time.Duration(delay)),
-		tmType: tmType,
 		opType: opType,
 		op:     rmOp,
 	}
@@ -309,7 +303,7 @@ func (tm *TM) addOp(tx TxId, rm RM, tmType int, delay int, opType int, rmOp Op) 
 	// SERIALISED
 	tm.mu.Lock()
 
-	tm.saveOp(tx, tmOp)
+	tm.saveOp(tx, tmType, tmOp)
 
 	id := tm.newId()
 	tmOp.id = opId(id)
@@ -365,7 +359,7 @@ func (tm *TM) doNext(tx TxId, timed bool) bool {
 
 	if len(ops) > 0 {
 		tmOp := ops[0]
-		
+
 		// check operation time
 		if timed && tmOp.due.After(time.Now()) {
 			return false // next op is not due yet
@@ -386,7 +380,7 @@ func (tm *TM) doNext(tx TxId, timed bool) bool {
 	}
 
 	// delete transaction if there are no more ops
-	if len(etx.immediate) + len(etx.timed) == 0 {
+	if len(etx.immediate)+len(etx.timed) == 0 {
 		delete(tm.etxs, tx)
 		return false
 	}
@@ -425,7 +419,7 @@ func (tm *TM) forget(ops []*etxOp, rm RM, opType int) []*etxOp {
 	name := rm.Name()
 
 	// scan operations from the end
-	for i := len(ops)-1; i >= 0; i-- {
+	for i := len(ops) - 1; i >= 0; i-- {
 		tmOp := ops[i]
 		if tmOp.rm.Name() == name && tmOp.opType == opType {
 			if i == len(ops)-1 {
@@ -437,12 +431,12 @@ func (tm *TM) forget(ops []*etxOp, rm RM, opType int) []*etxOp {
 			}
 
 			// delete after unlocking
-			toDel = append(toDel, tmOp.id) 
+			toDel = append(toDel, tmOp.id)
 		}
 	}
 
 	tm.mu.Unlock()
-	for id := range toDel {
+	for _, id := range toDel {
 		// forget this operation
 		if err := tm.store.DeleteId(int64(id)); err != nil {
 			tm.app.Log(err)
@@ -483,21 +477,21 @@ func reverse(s string) string {
 }
 
 // saveOp adds an operation to the cached list.
-func (tm *TM) saveOp(tx TxId, tmOp *etxOp) {
+func (tm *TM) saveOp(tx TxId, tmType int, tmOp *etxOp) {
 
 	etx := tm.etxs[tx]
 	if etx == nil {
 		// new transaction
 		etx = &etxOps{
 			immediate: make([]*etxOp, 0, 4),
-			timed: make([]*etxOp, 0, 4),
+			timed:     make([]*etxOp, 0, 4),
 		}
 		tm.etxs[tx] = etx
 	}
 
 	// choose map for immediate or timed operations
 	var ops *[]*etxOp
-	switch tmOp.tmType {
+	switch tmType {
 	case redoNext:
 		ops = &etx.immediate
 	case redoTimed:
@@ -524,11 +518,8 @@ func (tm *TM) worker(
 		case <-chTick:
 			// find all operations that are due
 			for tx := range tm.etxs {
-				for {
-					if tm.doNext(tx, true) {
-						break // no more synchronous ops
-					}
-				}
+				for tm.doNext(tx, true) {
+				} // until no more synchronous ops
 			}
 
 		case <-chDone:

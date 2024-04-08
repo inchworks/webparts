@@ -25,7 +25,7 @@
 // together with requests to delete media files being removed, and a request to perform step 4.
 //
 // (4) An extended transaction operation identifies the new media files that are being referenced and starts their conversion to displayable sizes and formats.
-// The operation is idempotent and will be repeated should the server be restarted while the operation is in progress. 
+// The operation is idempotent and will be repeated should the server be restarted while the operation is in progress.
 //
 // (5) When processing of all media files for the extended transaction is completed, a database transaction updates the parent object
 // to reference the processed media, and deletes the stage 4 operation request.
@@ -134,7 +134,7 @@ type Bind struct {
 	up       *Uploader
 	tx       etx.TxId
 	prefixTx string
-	unbound  map[string]string
+	unbound  map[string]string //  // stem -> stem.ext
 }
 
 type reqSave struct {
@@ -165,11 +165,10 @@ var WebFiles embed.FS
 // Name, ForOperation and Operation implement the RM interface for webparts.etx.
 
 // Operation types
-// Non-zero so we can select them by etx.Timeout.
 const (
 	OpOrphansV1Type = 0
-	OpCancelType    = iota + 1
-	OpDeleteType
+	OpCancelType    = 1
+	OpDeleteType    = 2
 )
 
 type OpCancel struct {
@@ -244,7 +243,7 @@ func (up *Uploader) Initialise(log *log.Logger, db DB, tm *etx.TM) {
 	up.chClaimed = make(chan reqClaimed, 4)
 
 	// start background worker
-	go up.worker(up.chSave, up.chClaimed, 	up.chDone)
+	go up.worker(up.chSave, up.chClaimed, up.chDone)
 
 	// separate worker for video processing
 	up.chVideosDone = make(chan bool, 1)
@@ -288,17 +287,24 @@ func (up *Uploader) Begin() (string, error) {
 	return etx.String(txId), nil
 }
 
-// NameFromFile returns the transaction ID and media file name from a file name.
-func NameFromFile(fileName string) (string, string) {
+// NameFromFile returns the media file name from a file name.
+func NameFromFile(fileName string) string {
 	if len(fileName) > 0 {
-		// sf[0] is "P" or "T", and sf[2] is an upload version
-		sf := strings.SplitN(fileName, "-", 4)
-
-		return sf[1], sf[3]
-
-	} else {
-		return "", ""
+		if fileName[0] == 'P' {
+			// old format: sf[1] is owner$version
+			sf := strings.SplitN(fileName, "-", 3)
+			if len(sf) == 3 {
+				return sf[2]
+			}
+		} else {
+			// sf[0] is "M" or "T", sf[1] a transaction ID, sf[2] an upload version
+			sf := strings.SplitN(fileName, "-", 4)
+			if len(sf) == 4 {
+				return sf[3]
+			}
+		}
 	}
+	return ""
 }
 
 // STEP 2 : when AJAX request received to upload file. Call Save with the transaction code.
@@ -343,7 +349,7 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId, version int) (er
 // Note that this is possible even when the server has restarted since step 2, because the client may have cached the form across the restart.
 //
 // (i) Start a database transaction and call Commit to keep the temporary files and indicate that step 4 will be executed.
-// 
+//
 // (ii) Use CleanName to sanitise the user's names for media, and use MediaType to check that uploaded file types are acceptable.
 //
 // (iii) If the media name is new or changed, call FileFromName to get the temporary file name to be stored in the database.
@@ -504,7 +510,7 @@ func (c *Claim) End(fn Uploaded) {
 //
 // (ii) For each media file referenced by the parent, call Bind.File and change the parent to use the new permanent file name for the media.
 //
-// (iii) Call Bind.End and commit the parent update to the database. 
+// (iii) Call Bind.End and commit the parent update to the database.
 
 // StartBind initiates linking a parent object to a set of uploaded files, returning a context for calls to Bind and EndBind.
 func (up *Uploader) StartBind(tx etx.TxId) *Bind {
@@ -522,7 +528,7 @@ func (up *Uploader) StartBind(tx etx.TxId) *Bind {
 	}
 
 	// list all processed files (extensions may have changed)
-	processed, _ := filepath.Glob(filepath.Join(up.FilePath, "P-"+txCode+"-*"))
+	processed, _ := filepath.Glob(filepath.Join(up.FilePath, "M-"+txCode+"-*"))
 
 	for _, f := range processed {
 		fn := filepath.Base(f)
@@ -538,8 +544,9 @@ func (b *Bind) File(fileName string) (string, error) {
 
 	// ## keep error return for future implementation with error reporting.
 
-	// is there an media file?
-	if fileName == "" {
+	// is there a temporary media file?
+	// Excludes old format "P" names and permanent files (which must already have processed).
+	if fileName == "" || fileName[0] != 'T' {
 		return "", nil
 	}
 
@@ -549,12 +556,12 @@ func (b *Bind) File(fileName string) (string, error) {
 	if prefixTx == b.prefixTx {
 		nm := stem(fileName)
 
-		pnm := "P" + nm[1:]
+		pnm := "M" + nm[1:]
 		newName := b.unbound[pnm] // new name and extension
 		if newName != "" {
 			delete(b.unbound, pnm)
 		}
-	
+
 		return newName, nil // new permanent name
 	}
 
@@ -566,11 +573,11 @@ func (b *Bind) End() error {
 
 	// delete unbound media for transaction
 	// We can't do file deletion sooner, because additional files may become unused after an overlapping transactions.
-	// requested even if there are none, so caller always gets an asyncronous notification
+	// requested even if there are none, so caller always gets an asynchronous notification
 	// (can't notify synchronously because caller probably holds database locks)
 	toDel := b.unbound
-	for nm := range toDel {
-		if err := b.up.removeMedia(toDel[nm]); err != nil {
+	for _, nm := range toDel {
+		if err := b.up.removeMedia(nm); err != nil {
 			b.up.errorLog.Print(err.Error())
 		}
 	}
@@ -678,7 +685,7 @@ func cutN(s string, sep rune, n int) (string, string) {
 }
 
 // fileFromNameNew returns a stored file name from a user's name for a newly uploaded file.
-// The prefix is "T" for a temporary file, and "P" for the permanent one.
+// The prefix is "T" for a temporary file, and "M" for a permanent media one.
 // It has no revision number, so it doesn't overwrite a previous copy yet.
 func fileFromNameNew(prefix string, id etx.TxId, version int, name string) string {
 	if name != "" {
@@ -849,7 +856,7 @@ func (up *Uploader) saveImage(req reqSave) error {
 	if toName == "" {
 		return errors.New("uploader: Unsupported file " + req.name) // ## shouldn't get this far?
 	}
-	toName = changePrefix("P", toName)
+	toName = changePrefix("M", toName)
 
 	// path for saved files
 	toPath := filepath.Join(up.FilePath, toName)
@@ -895,7 +902,7 @@ func (up *Uploader) saveMedia(req reqSave) error {
 	switch mt {
 	case MediaAudio, MediaVideo:
 		convert, err = up.saveAV(req)
-		if convert {
+		if !convert {
 			up.opDone(req.claim)
 		}
 		// otherwise, processing continued in AV worker
@@ -948,7 +955,7 @@ func (up *Uploader) worker(
 
 			// notify that all uploaded files have been processed
 			up.opDone(req.claim)
-			
+
 		case <-chDone:
 			// ## do something to finish other pending requests
 			return
