@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/inchworks/webparts/etx"
+	"github.com/inchworks/webparts/v2/etx"
 )
 
 // Processing for any V1 ETX operations, remaining before the server upgrade.

@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/inchworks/webparts/etx"
+	"github.com/inchworks/webparts/v2/etx"
 )
 
 // App is the interface to functions provided by the parent application.

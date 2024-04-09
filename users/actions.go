@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/inchworks/webparts/etx"
+	"github.com/inchworks/webparts/v2/etx"
 )
 
 // UserDisplayName returns the display name for a user.

@@ -8,7 +8,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/inchworks/webparts/multiforms"
+	"github.com/inchworks/webparts/v2/multiforms"
 )
 
 // GetFormLogin renders the form for a user to log in.

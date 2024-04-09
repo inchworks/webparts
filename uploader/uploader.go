@@ -68,7 +68,7 @@ import (
 
 	"github.com/disintegration/imaging"
 
-	"github.com/inchworks/webparts/etx"
+	"github.com/inchworks/webparts/v2/etx"
 )
 
 const (

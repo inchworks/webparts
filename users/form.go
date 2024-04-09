@@ -5,7 +5,7 @@ package users
 import (
 	"net/url"
 
-	"github.com/inchworks/webparts/multiforms"
+	"github.com/inchworks/webparts/v2/multiforms"
 )
 
 type UsersForm struct {

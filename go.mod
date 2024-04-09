@@ -1,4 +1,4 @@
-module github.com/inchworks/webparts
+module github.com/inchworks/webparts/v2
 
 go 1.16
 
