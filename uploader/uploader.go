@@ -22,7 +22,7 @@
 // They will eventually be deleted if no further action is taken, or if they are not eventually referenced by the parent object.
 //
 // (3) When a web request is received to create or update a parent object, a database transaction saves the changes to the parent object,
-// together with requests to delete media files being removed, and a request to perform step 4.
+// together with requests to remove media files being deleted, and a request to perform step 4.
 //
 // (4) An extended transaction operation identifies the new media files that are being referenced and starts their conversion to displayable sizes and formats.
 // The operation is idempotent and will be repeated should the server be restarted while the operation is in progress.
@@ -33,9 +33,12 @@
 //
 // Uploader also provides support for delayed deletion of media files belonging to parent object.
 // In single database transaction, call tx.Begin to start an extended transaction,
-// call Delete for each media file referenced, delete the object and commit the deletion to the database.
+// call Remove for each media file referenced, delete the object and commit the deletion to the database.
 //
-// Use Thumbnail to get the file name for a thumbnail image corresponding to a media file.
+// Use Status to get the processing status of a media file,
+// and Thumbnail to get the file name for a thumbnail image corresponding to a media file.
+//
+// For convenience, Uploader provides a Delete function that deletes a media file and its thumbnail immediately.
 //
 // Note that because files are labelled with a transaction ID,
 // the different name forces browsers to fetch an updated file after a file with the same name has been uploaded.
@@ -44,7 +47,7 @@
 // A caller might save just the temporary file names at step 2 and,
 // if a request is made to display the parent object, show a dummy image or thumbnail for any temporary files.
 // Or a caller might store both previous and new file names, and continue to show previous images until step 5.
-// Uploader will not delete old files until all new file processing is completed.
+// Uploader will not remove old files until all new file processing is completed.
 //
 // ## Issue: what if client sends an upload after submitting the form. Can it be recognised for error and deletion?
 
@@ -207,7 +210,7 @@ func (up *Uploader) Operation(id etx.TxId, opType int, op etx.Op) {
 
 	case *OpDelete:
 		// delete a media file
-		if err := up.removeOrphan(id, req.Name); err != nil {
+		if err := up.deleteOrphan(id, req.Name); err != nil {
 			up.errorLog.Print(err.Error())
 		}
 
@@ -314,7 +317,8 @@ func NameFromFile(fileName string) string {
 // distinguishes files of different types but with the same name.
 
 // Save creates a temporary copy of an uploaded file, to be processed later.
-func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId, version int) (err error, byClient bool) {
+// With an error it returns true if it is the client's fault, false if it is the server's fault.
+func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId, version int) (error, bool) {
 
 	// get image from request header
 	file, err := fh.Open()
@@ -335,14 +339,22 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId, version int) (er
 	path := filepath.Join(up.FilePath, fn)
 	temp, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0666)
 	if err != nil {
-		return err, false // could be a bad name?
+		return err, false // ## could be a bad name?
 	}
 	_, err = io.Copy(temp, file)
-	temp.Close()
 	if err != nil {
+		temp.Close()
 		return err, false
 	}
-	return nil, false
+
+	// guarantee to the user that the file has been saved
+	err = temp.Sync()
+	if err != nil {
+		temp.Close()
+		return err, false
+	}
+
+	return temp.Close(), false // unlikely to fail after sync
 }
 
 // STEP 3 : when web form to create or update parent object received.
@@ -353,7 +365,7 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId, version int) (er
 // (ii) Use CleanName to sanitise the user's names for media, and use MediaType to check that uploaded file types are acceptable.
 //
 // (iii) If the media name is new or changed, call FileFromName to get the temporary file name to be stored in the database.
-// Call Delete for existing media files that are to be deleted or replaced.
+// Call Remove for existing media files that are to be deleted or replaced.
 //
 // (iv) Call tx.AddNext ensure the next step will be executed, commit the change to the database, and call tx.Do.
 
@@ -414,8 +426,8 @@ func (up *Uploader) Commit(tx etx.TxId) error {
 	return nil
 }
 
-// Delete removes a media file after a delay to allow for cached web pages holding references to be aged.
-func (up *Uploader) Delete(tx etx.TxId, filename string) error {
+// Remove deletes a media file after a delay to allow for cached web pages holding references to be aged.
+func (up *Uploader) Remove(tx etx.TxId, filename string) error {
 
 	// Ignore deletion requests for temporary files, so current processing not interfered.
 	// (Could be from an overlapping transaction.)
@@ -577,7 +589,7 @@ func (b *Bind) End() error {
 	// (can't notify synchronously because caller probably holds database locks)
 	toDel := b.unbound
 	for _, nm := range toDel {
-		if err := b.up.removeMedia(nm); err != nil {
+		if err := b.up.deleteMedia(nm); err != nil {
 			b.up.errorLog.Print(err.Error())
 		}
 	}
@@ -617,6 +629,14 @@ func Thumbnail(filename string) string {
 		tn := changeExt(filename, ".jpg")
 		return "S" + tn[1:]
 	}
+}
+
+// CONVENIENCE FUNCTIONS
+
+// Delete removes a media file immediately, together with its thumbnail.
+// Operation is idempotent. I.e. no error is returned if the file has already been deleted.
+func (up *Uploader) Delete(filename string) error {
+	return up.deleteMedia(filename)
 }
 
 // IMPLEMENTATION
@@ -663,12 +683,12 @@ func copyStatic(toDir, name string, fromFS fs.FS, path string) error {
 	if dst, err = os.Create(filepath.Join(toDir, name)); err != nil {
 		return err
 	}
-	defer dst.Close()
 
 	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
 		return err
 	}
-	return nil
+	return dst.Close()
 }
 
 // cutN returns two strings, before and after the Nth separator
@@ -767,10 +787,10 @@ func (up *Uploader) opDone(c *Claim) {
 	}
 }
 
-// removeMedia unlinks an image file and the corresponding thumbnail.
-func (up *Uploader) removeOrphan(tx etx.TxId, name string) error {
+// deleteMedia unlinks an image file and the corresponding thumbnail.
+func (up *Uploader) deleteOrphan(tx etx.TxId, name string) error {
 
-	if err := up.removeMedia(name); err != nil {
+	if err := up.deleteMedia(name); err != nil {
 		up.errorLog.Print(err.Error())
 	}
 
@@ -781,7 +801,7 @@ func (up *Uploader) removeOrphan(tx etx.TxId, name string) error {
 	return up.tm.End(tx)
 }
 
-// removeOrphans deletes all files for an abandoned transaction.
+// deleteOrphans deletes all files for an abandoned transaction.
 func (up *Uploader) removeOrphans(id etx.TxId) error {
 
 	// all files for transaction
@@ -789,7 +809,7 @@ func (up *Uploader) removeOrphans(id etx.TxId) error {
 	files, _ := filepath.Glob(filepath.Join(up.FilePath, "?-"+tn+"-*"))
 
 	for _, f := range files {
-		if err := up.removeMedia(f); err != nil {
+		if err := up.deleteMedia(f); err != nil {
 			up.errorLog.Print(err.Error())
 		}
 	}
@@ -801,9 +821,9 @@ func (up *Uploader) removeOrphans(id etx.TxId) error {
 	return up.tm.End(id)
 }
 
-// removeMedia unlinks an image file and the corresponding thumbnail.
+// deleteMedia unlinks an image file and the corresponding thumbnail.
 // (If this is the sole link, the file is deleted.)
-func (up *Uploader) removeMedia(fileName string) error {
+func (up *Uploader) deleteMedia(fileName string) error {
 	nm := fileName
 
 	// remove file

@@ -57,9 +57,10 @@ type App interface {
 
 const (
 	// user status values
-	UserSuspended = 0 // blocked from access or registration
-	UserKnown     = 1 // allowed to register and set display name and password
-	UserActive    = 2 // registered
+	UserRemoved   = -10 // deletion in progress but cached access allowed
+	UserSuspended = 0   // blocked from access or registration
+	UserKnown     = 1   // allowed to register and set display name and password
+	UserActive    = 2   // registered
 
 	MaxName = 60 // maximum name characters
 )
@@ -80,14 +81,14 @@ type User struct {
 // To be implemented by the parent application.
 // Id and Username are unique keys for a user.
 type UserStore interface {
-	ByName() []*User                                // all users, in name order
-	DeleteId(id int64) error						// delete user
-	Get(id int64) (*User, error)                    // get user by database ID
+	ByName() []*User                         // all users, in name order
+	DeleteId(id int64) error                 // delete user
+	Get(id int64) (*User, error)             // get user by database ID
 	GetNamed(username string) (*User, error) // get user for username (expected to be unique)
-	IsNoRecord(error) bool							// true if error is "record not found"
-	Name(id int64) string                           // get display name for user by database ID
-	Rollback()                                      // (redundant)
-	Update(s *User) error                           // add or update user
+	IsNoRecord(error) bool                   // true if error is "record not found"
+	Name(id int64) string                    // get display name for user by database ID
+	Rollback()                               // (redundant)
+	Update(s *User) error                    // add or update user
 }
 
 // Users holds the dependencies of this package on the parent application.
@@ -100,5 +101,6 @@ type Users struct {
 }
 
 // WebFiles are the package's web resources (templates and static files)
+//
 //go:embed web
 var WebFiles embed.FS

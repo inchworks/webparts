@@ -36,6 +36,8 @@ type Server struct {
 	// port addresses
 	AddrHTTP  string
 	AddrHTTPS string
+
+	Timeout time.Duration
 }
 
 // Serve runs the web server. It never returns.
@@ -56,7 +58,7 @@ func (srv *Server) Serve(app App) {
 		srv.InfoLog.Printf("Starting server %s", srv.AddrHTTPS)
 
 		// HTTPS server, with certificate from manager
-		srv1 := newServer(srv.AddrHTTPS, app.Routes(), srv.ErrorLog, true)
+		srv1 := newServer(srv.AddrHTTPS, app.Routes(), srv.ErrorLog, srv.Timeout)
 		srv1.TLSConfig = &tls.Config{
 			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 				// GoogleBot wants to connect without SNI. Use default name.
@@ -80,7 +82,7 @@ func (srv *Server) Serve(app App) {
 		}
 
 		// HTTP server : accept http-01 challenges, and redirect HTTP -> HTTPS
-		srv2 := newServer(srv.AddrHTTP, m.HTTPHandler(http.HandlerFunc(handleHTTPRedirect)), srv.ErrorLog, false)
+		srv2 := newServer(srv.AddrHTTP, m.HTTPHandler(http.HandlerFunc(handleHTTPRedirect)), srv.ErrorLog, 0)
 		go srv2.ListenAndServe()
 
 		// HTTPS server
@@ -93,7 +95,7 @@ func (srv *Server) Serve(app App) {
 		srv.InfoLog.Printf("Starting server %s", srv.AddrHTTP)
 
 		// just an HTTP server
-		srv1 := newServer(srv.AddrHTTP, app.Routes(), srv.ErrorLog, true)
+		srv1 := newServer(srv.AddrHTTP, app.Routes(), srv.ErrorLog, srv.Timeout)
 
 		err := srv1.ListenAndServe()
 		srv.ErrorLog.Fatal(err)
@@ -101,7 +103,6 @@ func (srv *Server) Serve(app App) {
 
 	// ## Add option with self-signed certificates
 	// ## was: err = srv.ListenAndServeTLS("./tls/cert.pem", "./tls/key.pem")
-
 }
 
 // handleHTTPRedirect redirects HTTP requests to HTTPS.
@@ -124,7 +125,7 @@ func stripPort(hostport string) string {
 }
 
 // newServer makes an HTTP server, with appropriate timeout settings.
-func newServer(addr string, handler http.Handler, log *log.Logger, main bool) *http.Server {
+func newServer(addr string, handler http.Handler, log *log.Logger, timeout time.Duration) *http.Server {
 
 	// common server parameters for HTTP/HTTPS
 	s := &http.Server{
@@ -134,20 +135,24 @@ func newServer(addr string, handler http.Handler, log *log.Logger, main bool) *h
 	}
 
 	// set timeouts so that a slow or malicious client doesn't hold resources forever
-	if main {
+	if timeout > 0 {
 
-		// These are lax ones, but suggested in
-		//   https://medium.com/@simonfrey/go-as-in-golang-standard-net-http-config-will-break-your-production-environment-1360871cb72b
-		s.ReadHeaderTimeout = 20 * time.Second // this is the one that matters for SlowLoris?
-		// ReadTimeout:  1 * time.Minute, // remove if variable timeouts in handlers
-		s.WriteTimeout = 2 * time.Minute // starts after reading of request headers
+		// minimum practical timeout
+		if timeout < 10 * time.Second {
+			timeout = 10 * time.Second
+		}
+
+		// default timeouts, to be increased using http.ResponseController as needed
+		s.ReadHeaderTimeout = timeout / 2 // this is the one that matters for SlowLoris
+		s.ReadTimeout = timeout
+		s.WriteTimeout = 2 * timeout // includes read time on HTTPS, confusingly :-(
 		s.IdleTimeout = 2 * time.Minute
 
 	} else {
 		// tighter limits for HTTP certificate renewal and redirection to HTTPS
-		s.ReadTimeout = 5 * time.Second   // remove if variable timeouts in handlers
-		s.WriteTimeout = 10 * time.Second // starts after reading of request headers
-		s.IdleTimeout = 1 * time.Minute
+		s.ReadTimeout = 5 * time.Second  // remove if variable timeouts in handlers
+		s.WriteTimeout = 5 * time.Second // starts after read
+		s.IdleTimeout = 2 * time.Minute
 	}
 
 	return s
