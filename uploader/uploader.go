@@ -365,7 +365,7 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId, version int) (er
 // (ii) Use CleanName to sanitise the user's names for media, and use MediaType to check that uploaded file types are acceptable.
 //
 // (iii) If the media name is new or changed, call FileFromName to get the temporary file name to be stored in the database.
-// Call Remove for existing media files that are to be deleted or replaced.
+// Call Delete for existing media files that are to be deleted or replaced.
 //
 // (iv) Call tx.AddNext ensure the next step will be executed, commit the change to the database, and call tx.Do.
 
@@ -426,8 +426,8 @@ func (up *Uploader) Commit(tx etx.TxId) error {
 	return nil
 }
 
-// Remove deletes a media file after a delay to allow for cached web pages holding references to be aged.
-func (up *Uploader) Remove(tx etx.TxId, filename string) error {
+// Delete removes a media file and deletes it after a delay to allow for cached web pages holding references to be aged.
+func (up *Uploader) Delete(tx etx.TxId, filename string) error {
 
 	// Ignore deletion requests for temporary files, so current processing not interfered.
 	// (Could be from an overlapping transaction.)
@@ -633,9 +633,9 @@ func Thumbnail(filename string) string {
 
 // CONVENIENCE FUNCTIONS
 
-// Delete removes a media file immediately, together with its thumbnail.
+// DeleteNow removes a media file immediately, together with its thumbnail.
 // Operation is idempotent. I.e. no error is returned if the file has already been deleted.
-func (up *Uploader) Delete(filename string) error {
+func (up *Uploader) DeleteNow(filename string) error {
 	return up.deleteMedia(filename)
 }
 
