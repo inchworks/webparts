@@ -169,7 +169,8 @@ func (tm *TM) Do(tx TxId) error {
 	return nil
 }
 
-// End terminates and forgets the current operation.
+// End terminates and forgets an operation.
+// It must be called by each RM.Operation, synchronously or asynchronously, in the context of a RedoStore transaction.
 func (tm *TM) End(txId TxId) error {
 
 	// V1 end is simple - just forget the operation because V1 transactions are single operations
@@ -191,9 +192,9 @@ func (tm *TM) End(txId TxId) error {
 	var id opId
 	var err error
 	if etx.isTimed {
-		id, err = tm.end(&etx.timed)
+		id, err = end(&etx.timed)
 	} else {
-		id, err = tm.end(&etx.immediate)
+		id, err = end(&etx.immediate)
 	}
 	tm.mu.Unlock()
 
@@ -393,8 +394,8 @@ func (tm *TM) doNext(tx TxId, timed bool) bool {
 	}
 }
 
-// end forgets the current operation (immediate or timed), and returns its redo record ID.
-func (tm *TM) end(ops *[]*etxOp) (opId, error) {
+// end forgets an operation (immediate or timed), and returns its redo record ID.
+func end(ops *[]*etxOp) (opId, error) {
 
 	if len(*ops) == 0 {
 		return 0, errors.New("etx: Operation already ended")
