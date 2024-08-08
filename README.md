@@ -23,7 +23,7 @@ Please open issues to discuss new features.
 ## Acknowledgments
 
 Go Packages
-- [disintegration/imaging](https://github.com/disintegration/imaging) Image processing.
+- [oschwald/maxminddb-golang](https://github.com/oschwald/maxminddb-golang) Geoblocking database reader.
 
 Other
 - [Speaker_Icon.svg](https://commons.wikimedia.org/wiki/File:Speaker_Icon.svg) Icon for audio files.

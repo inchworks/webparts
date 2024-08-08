@@ -12,19 +12,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
-
-	"github.com/disintegration/imaging"
 )
 
 // convert saves a media file in the specified type and returns the converted file name.
-func (up *Uploader) convert(req reqSave, toType string, outOpt ...string) (string, error) {
+func (up *Uploader) convert(req reqSave, outOpt ...string) (string, error) {
 
 	fromName := req.name
 	fromPath := filepath.Join(up.FilePath, fromName)
 
 	// output file
 	toName := changePrefix("M", fromName)
-	toName = changeExt(toName, toType)
+	toName = changeExt(toName, req.format.toType) // normalised or converted file extension
 
 	// the file may have already been converted, if we are redoing the operations
 	ok, err := exists(fromPath)
@@ -60,20 +58,20 @@ func (up *Uploader) convert(req reqSave, toType string, outOpt ...string) (strin
 // convertAV saves an audio or video file.
 func (up *Uploader) convertAV(req reqSave) (string, error) {
 
-	switch req.mediaType {
+	switch req.format.mediaType {
 	case MediaAudio:
-		return up.convert(req, req.toType,
+		return up.convert(req,
 			"-c:a", "aac",
 			"-b:a, 128k",
 		)
 	case MediaVideo:
-		return up.convert(req, req.toType,
+		return up.convert(req,
 			"-vf", fmt.Sprint("scale=-2:'min(", up.VideoResolution, ",ih)'"),
 			"-c:v", "libx264",
 			"-preset", "fast",
 			"-c:a", "aac")
 	}
-	return "", errors.New("Unsupported AV type")
+	return "", errors.New("uploader: Unsupported AV type")
 }
 
 // exists returns true if a file already exists
@@ -106,13 +104,13 @@ func (up *Uploader) saveSnapshot(videoName string) error {
 			sn, err = os.Open(snPath)
 		}
 		if err == nil {
-			img, err = imaging.Decode(sn, imaging.AutoOrientation(true))
+			img, _, err = decodeImage(sn)
 			sn.Close()
 		}
 
 		if err == nil {
 			// save thumbnail, assuming we can overwrite the full-sized image
-			err = up.saveThumbnail(img, snPath)
+			err = up.saveThumbnail(img, orientationNormal, snPath)
 		}
 
 		if err != nil {
@@ -135,23 +133,19 @@ func (up *Uploader) saveAV(req reqSave) (bool, error) {
 
 	// convert non-displayable AV formats, if we can
 	fromPath := filepath.Join(up.FilePath, fromName)
-	toName, toType, convert := changeType(req.name, up.AudioTypes, up.VideoTypes)
-	if toName == "" {
-		return false, errors.New("uploader: Unsupported file " + req.name) // ## shouldn't get this far?
-	}
+	convert := req.format.convert
+	toName := changeExt(req.name, req.format.toType)  // normalised or converted file extension
 
 	if up.VideoPackage != "" {
 		if !convert {
 			// is file small enough to keep the original unprocessed?
 			fi, err := os.Stat(fromPath)
 			if err == nil && fi.Size() > int64(up.MaxSize) {
-				req.toType = toType
 				convert = true
 			}
 		}
 	}
 	if convert {
-		req.toType = toType
 		up.chConvert <- req
 
 	} else {
@@ -162,7 +156,7 @@ func (up *Uploader) saveAV(req reqSave) (bool, error) {
 		}
 	}
 
-	switch req.mediaType {
+	switch req.format.mediaType {
 	case MediaAudio:
 		// add a dummy thumbnail
 		err = copyStatic(up.FilePath, Thumbnail(fromName), WebFiles, "web/static/audio.png")
@@ -251,7 +245,7 @@ func (up *Uploader) avWorker(
 			toName, err := up.convertAV(req)
 			if err == nil {
 				// extract snapshot from converted video
-				err = up.saveSnapshot(changeExt(toName, req.toType))
+				err = up.saveSnapshot(changeExt(toName, req.format.toType))
 			}
 			if err != nil {
 				up.errorLog.Print(err.Error())

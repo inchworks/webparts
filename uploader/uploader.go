@@ -13,7 +13,8 @@
 // Uploader maintains consistency across server restarts between the parent object and the media files it references.
 // Operation is intended to be robust for processing that may take a long time, such as converting a video file.
 // To prevent overloading a modest server, on a server restart the workload for recovery is limited to that similar to normal operation.
-//
+package uploader
+
 // Uploading is handled in five steps:
 //
 // (1) A extended transaction ID is allocated when a web request is received to create or update a parent object.
@@ -48,16 +49,13 @@
 // if a request is made to display the parent object, show a dummy image or thumbnail for any temporary files.
 // Or a caller might store both previous and new file names, and continue to show previous images until step 5.
 // Uploader will not remove old files until all new file processing is completed.
-//
-// ## Issue: what if client sends an upload after submitting the form. Can it be recognised for error and deletion?
 
-package uploader
+// ## Issue: what if client sends an upload after submitting the form. Can it be recognised for error and deletion?
 
 import (
 	"embed"
 	"errors"
 	"fmt"
-	"image"
 	"io"
 	"io/fs"
 	"log"
@@ -68,8 +66,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/disintegration/imaging"
 
 	"github.com/inchworks/webparts/v2/etx"
 )
@@ -87,6 +83,7 @@ type Uploader struct {
 	FilePath        string
 	MaxW            int
 	MaxH            int
+	MaxDecoded      int // maximum decoded image size (bytes)
 	MaxSize         int // maximum size for AV to use original without processing
 	ThumbW          int
 	ThumbH          int
@@ -94,9 +91,13 @@ type Uploader struct {
 	DeleteAfter     time.Duration // delay before deleting a file
 	SnapshotAt      time.Duration // snapshot time in video (-ve for none)
 	AudioTypes      []string
+	ImageQuality    int    // JPEG quality, 1-100
 	VideoPackage    string // software for video processing: ffmpeg, or a docker-hosted implementation of ffmpeg, for debugging
 	VideoResolution int
 	VideoTypes      []string
+
+	// media accepted and converted
+	mediaFormats    map[string]mediaFormat
 
 	// components
 	errorLog *log.Logger
@@ -141,9 +142,8 @@ type Bind struct {
 }
 
 type reqSave struct {
-	mediaType int
+	format mediaFormat
 	name      string // file name
-	toType    string // for conversion
 	claim     *Claim
 }
 
@@ -153,6 +153,12 @@ type reqClaimed struct {
 
 type reqBound struct {
 	bind *Bind
+}
+
+type mediaFormat struct {
+	mediaType int
+	convert   bool
+	toType    string // converted extension
 }
 
 // DB is an interface to the database manager that handles parent transactions.
@@ -229,12 +235,21 @@ func (up *Uploader) Initialise(log *log.Logger, db DB, tm *etx.TM) {
 	if up.MaxAge == 0 {
 		up.MaxAge = time.Hour
 	}
+	if up.MaxDecoded == 0 {
+		up.MaxDecoded = 512 * 1024 * 1024 // 50% of 1GB server, and suffient for 64Mpx full-frame camera
+	}
 	if up.MaxSize == 0 {
 		up.MaxSize = 3 * 1024 * 1024
+	}
+	if up.ImageQuality < 1 || up.ImageQuality > 100 {
+		up.ImageQuality = 95
 	}
 	if up.VideoResolution == 0 {
 		up.VideoResolution = 1080
 	}
+
+	// acceptable media types
+	up.mediaFormats = initialiseFormats(up.AudioTypes, up.VideoTypes)
 
 	up.errorLog = log
 	up.db = db
@@ -400,9 +415,7 @@ func FileFromName(id etx.TxId, version int, name string) string {
 
 // MediaType returns the media type. It is 0 if not accepted.
 func (up *Uploader) MediaType(name string) int {
-
-	mt, _, _ := getType(name, up.AudioTypes, up.VideoTypes)
-	return mt
+	return up.getFormat(name).mediaType
 }
 
 // Commit makes temporary uploaded files permanent.
@@ -652,19 +665,6 @@ func changePrefix(prefix string, name string) string {
 	return prefix + name[1:]
 }
 
-// changeType normalises a media file extension, and returns the displayable file type to which it should be converted.
-// A blank name is returned for an unsupported format, and a blank type if no conversion is needed.
-func changeType(name string, audioTypes []string, videoTypes []string) (nm string, toType string, convert bool) {
-
-	mt, ext, cvt := getType(name, audioTypes, videoTypes)
-	if mt != 0 {
-		nm = changeExt(name, ext)
-		toType = ext
-		convert = cvt
-	}
-	return
-}
-
 // copyStatic copies a static file to the specified directory.
 func copyStatic(toDir, name string, fromFS fs.FS, path string) error {
 	var src fs.File
@@ -715,52 +715,38 @@ func fileFromNameNew(prefix string, id etx.TxId, version int, name string) strin
 	}
 }
 
-// getType returns the mediaType and normalised file extension, and indicates if it needs conversion.
-// A blank name is returned for an unsupported format.
-func getType(name string, audioTypes []string, videoTypes []string) (mediaType int, ext string, convert bool) {
+// getFormat returns the media format for a file name.
+// mediaFormat.mediaType is 0 for for an unsupported format.
+func (up *Uploader) getFormat(name string) mediaFormat {
+	return up.mediaFormats[filepath.Ext(name)]
+}
 
-	if fmt, err := imaging.FormatFromFilename(name); err == nil {
-		// image formats
-		mediaType = MediaImage
+// initialiseFormats returns the mediaFormat specifications for all supported media types.
+func initialiseFormats(audioTypes []string, videoTypes []string) (formats map[string]mediaFormat) {
 
-		switch fmt {
-		case imaging.JPEG:
-			ext = ".jpg"
-			convert = false
+	formats = make(map[string]mediaFormat, 20)
 
-		case imaging.PNG:
-			ext = ".png"
-			convert = false
+	// acceptable image types
+	formats[".bmp"] = mediaFormat{mediaType: MediaImage, convert: true, toType:".png"}
+	formats[".gif"] = mediaFormat{mediaType: MediaImage, convert: true, toType:".png"}
+	formats[".jpg"] = mediaFormat{mediaType: MediaImage, convert: false, toType:".jpg"}
+	formats[".jpeg"] = mediaFormat{mediaType: MediaImage, convert: false, toType:".jpg"}
+	formats[".png"] = mediaFormat{mediaType: MediaImage, convert: false, toType:".png"}
+	formats[".tif"] = mediaFormat{mediaType: MediaImage, convert: true, toType:".jpg"}
+	formats[".tiff"] = mediaFormat{mediaType: MediaImage, convert: true, toType:".jpg"}
 
-		default:
-			// convert to JPG
-			ext = ".jpg"
-			convert = true
-		}
-	} else {
-		t := strings.ToLower(filepath.Ext(name))
-
-		// acceptable audio formats, all converted to M4A
-		for _, vt := range audioTypes {
-			if t == vt {
-				mediaType = MediaAudio
-				ext = ".m4a"
-				convert = (t != ext)
-				break
-			}
-		}
-
-		// acceptable video formats, all converted to MP4
-		for _, vt := range videoTypes {
-			if t == vt {
-				mediaType = MediaVideo
-				ext = ".mp4"
-				convert = (t != ext)
-				break
-			}
-		}
+	// acceptable audio formats, all converted to M4A
+	for _, t := range audioTypes {
+		cvt := t != ".m4a"
+		formats[t] = mediaFormat{mediaType: MediaAudio, convert: cvt, toType:".m4a"}
 	}
 
+	// acceptable video formats, all converted to MP4
+	for _, t := range videoTypes {
+		cvt := t != ".mp4"
+		formats[t] = mediaFormat{mediaType: MediaVideo, convert: cvt, toType:".mp4"}
+	}
+	
 	return
 }
 
@@ -849,77 +835,13 @@ func (up *Uploader) deleteMedia(fileName string) error {
 	return nil
 }
 
-// saveImage completes image saving, converting and resizing as needed.
-func (up *Uploader) saveImage(req reqSave) error {
-
-	// read temporary image
-	// ## could cache small images when received
-	fromPath := filepath.Join(up.FilePath, req.name)
-
-	tf, err := os.Open(fromPath)
-	if err != nil {
-		return err
-	}
-
-	// decode image
-	img, err := imaging.Decode(tf, imaging.AutoOrientation(true))
-	tf.Close()
-
-	resize := false
-	size := img.Bounds().Size()
-	if size.X > up.MaxW || size.Y > up.MaxH {
-		resize = true
-	}
-
-	// convert non-displayable file types to JPG
-	toName, _, convert := changeType(req.name, []string{}, []string{})
-	if toName == "" {
-		return errors.New("uploader: Unsupported file " + req.name) // ## shouldn't get this far?
-	}
-	toName = changePrefix("M", toName)
-
-	// path for saved files
-	toPath := filepath.Join(up.FilePath, toName)
-	thumbPath := filepath.Join(up.FilePath, Thumbnail(toName))
-
-	// rename uploaded image if it was small enough to use unchanged
-	if !resize && !convert {
-
-		if err := os.Rename(fromPath, toPath); err != nil {
-			return err
-		}
-
-	} else {
-
-		// make smaller image and delete original
-		// ## Could set compression option, or sharpen, but how much?
-		resized := imaging.Fit(img, up.MaxW, up.MaxH, imaging.Lanczos)
-		runtime.Gosched()
-
-		if err := imaging.Save(resized, toPath); err != nil {
-			return err // ## could be a bad name?
-		}
-		if err := os.Remove(fromPath); err != nil {
-			return err
-		}
-	}
-
-	// save thumbnail
-	if err := up.saveThumbnail(img, thumbPath); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 // saveMedia performs image or video processing, called from background worker.
 func (up *Uploader) saveMedia(req reqSave) error {
 	var convert bool
 	var err error
 
-	mt := up.MediaType(req.name)
-	req.mediaType = mt
-	switch mt {
+	req.format = up.getFormat(req.name)
+	switch req.format.mediaType {
 	case MediaAudio, MediaVideo:
 		convert, err = up.saveAV(req)
 		if !convert {
@@ -933,13 +855,6 @@ func (up *Uploader) saveMedia(req reqSave) error {
 	}
 
 	return err
-}
-
-// saveThumbnail generates a thumbnail for an image
-func (up *Uploader) saveThumbnail(img image.Image, to string) error {
-	// save thumbnail
-	thumbnail := imaging.Fit(img, up.ThumbW, up.ThumbH, imaging.Lanczos)
-	return imaging.Save(thumbnail, to)
 }
 
 // stem returns the filename without the extension.
