@@ -460,9 +460,9 @@ func (up *Uploader) Delete(tx etx.TxId, filename string) error {
 //
 // (i) Call StartClaim to start identifying the media files that are wanted.
 //
-// (ii) For each media file referenced by the parent, call Bind.File. This starts uploader processing, to resize or convert the file.
+// (ii) For each media file referenced by the parent, call Claim.File. This starts uploader processing, to resize or convert the file.
 //
-// (iii) Call Bind.End and specify a function to be called when all uploader processing has been done.
+// (iii) Call Claim.End and specify a function to be called when all uploader processing has been done.
 // Any files uploaded and not referenced will be deleted.
 
 // StartClaim prepares for the client to identify the files it references.
@@ -535,7 +535,9 @@ func (c *Claim) End(fn Uploaded) {
 //
 // (ii) For each media file referenced by the parent, call Bind.File and change the parent to use the new permanent file name for the media.
 //
-// (iii) Call Bind.End and commit the parent update to the database.
+// (iii) Call Bind.End.
+//
+// (iv) Call tx.End and commit the parent update to the database.
 
 // StartBind initiates linking a parent object to a set of uploaded files, returning a context for calls to Bind and EndBind.
 func (up *Uploader) StartBind(tx etx.TxId) *Bind {
@@ -718,7 +720,7 @@ func fileFromNameNew(prefix string, id etx.TxId, version int, name string) strin
 // getFormat returns the media format for a file name.
 // mediaFormat.mediaType is 0 for for an unsupported format.
 func (up *Uploader) getFormat(name string) mediaFormat {
-	return up.mediaFormats[filepath.Ext(name)]
+	return up.mediaFormats[strings.ToLower(filepath.Ext(name))]
 }
 
 // initialiseFormats returns the mediaFormat specifications for all supported media types.
