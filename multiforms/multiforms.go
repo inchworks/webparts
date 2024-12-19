@@ -14,12 +14,8 @@ package multiforms
 //   we always unpack them into structs when the form is received. We use the same structs
 //   to contruct the template.
 // o Errors (for parent and child) are mostly null, so held in maps within Form.
-//   ## Keeps the child errors away from the Child struct, but they could have gone there instead,
-//   and then Add and Get for them would have looked more like access to parent errors.
-// o ## Tidier to put Child and its methods in another file?
 // o Must rember to create a template item (index -1( when building the child structs,
 //   and to skip it when processing the returned form.
-// o ## Should some of the child processing be pushed down into formSlides.go?
 
 import (
 	"embed"
@@ -31,6 +27,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -287,6 +284,34 @@ func (f *Form) ChildText(field string, i int, ix int, min int, max int) string {
 	}
 
 	return value
+}
+
+// ChildTime returns a date-time from a child form.
+func (f *Form) ChildTime(field string, i int, ix int, def time.Time, loc *time.Location) (t time.Time) {
+
+	// don't validate template
+	if ix == -1 {
+		return
+	}
+
+	value := f.Values[field][i]
+	if value == "" {
+		t = def
+		return // default date-time
+	}
+
+	// HTML input date or datetime-local expected
+	var err error
+	if len(value) <= 10 {
+		if t, err = time.ParseInLocation("2006-01-02", value, loc); err != nil {
+			f.ChildErrors.Add(field, ix, "Invalid date")
+		}
+	} else {
+		if t, err = time.ParseInLocation("2006-01-02T15:04", value, loc); err != nil {
+			f.ChildErrors.Add(field, ix, "Invalid date or time")
+		}
+	}
+	return
 }
 
 // ChildTrimmed is deprecated. Use ChildText.
