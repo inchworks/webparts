@@ -8,10 +8,14 @@ import (
 	"github.com/inchworks/webparts/v2/multiforms"
 )
 
+type Opt struct {
+	Attrs string
+	Text string
+}
+
 type UsersForm struct {
 	multiforms.Form
-	RoleOpts   []string
-	StatusOpts []string
+	RoleOpts   []Opt
 	Children   []*UserFormData
 	App        interface{}
 }
@@ -23,22 +27,38 @@ type UserFormData struct {
 	NUser       int64
 	Role        int
 	Status      int
+	StatusOpts  []string
 }
 
 var statusOpts = []string{"suspended", "known", "active"}
 
 // NewUsersForm returns a form to edit users.
 func (u *Users) NewUsersForm(data url.Values, token string) *UsersForm {
+	opts := make([]Opt, len(u.Roles))
+	for i, r := range u.Roles{
+		opts[i] = Opt{Text: r}
+		if len(u.RoleDisabled) > i && u.RoleDisabled[i] {
+			opts[i].Attrs = "disabled"
+		}
+	}
+
 	return &UsersForm{
 		Form:       *multiforms.New(data, token),
-		RoleOpts:   u.Roles,
-		StatusOpts: statusOpts,
+		RoleOpts:   opts,
 		Children:   make([]*UserFormData, 0, 16),
 	}
 }
 
 // Add appends a user sub-form to the form.
 func (f *UsersForm) Add(index int, u *User) {
+
+	// omit active option if user has no password
+	var opts []string
+	if len(u.Password) == 0 {
+		opts = statusOpts[:2]
+	} else {
+		opts = statusOpts
+	}
 
 	f.Children = append(f.Children, &UserFormData{
 		Child:       multiforms.Child{Parent: &f.Form, ChildIndex: index},
@@ -47,6 +67,7 @@ func (f *UsersForm) Add(index int, u *User) {
 		NUser:       u.Id,
 		Role:        u.Role,
 		Status:      u.Status,
+		StatusOpts:  opts,
 	})
 }
 
@@ -56,6 +77,7 @@ func (f *UsersForm) AddTemplate() {
 	f.Children = append(f.Children, &UserFormData{
 		Child:  multiforms.Child{Parent: &f.Form, ChildIndex: -1},
 		Status: UserKnown,
+		StatusOpts: statusOpts[:2],
 	})
 }
 

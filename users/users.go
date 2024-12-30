@@ -94,10 +94,11 @@ type UserStore interface {
 // Users holds the dependencies of this package on the parent application.
 // It has no state of its own.
 type Users struct {
-	App   App
-	Roles []string
-	Store UserStore
-	TM    *etx.TM
+	App          App
+	Roles        []string
+	RoleDisabled []bool
+	Store        UserStore
+	TM           *etx.TM
 }
 
 // WebFiles are the package's web resources (templates and static files)
