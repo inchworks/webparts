@@ -99,9 +99,55 @@ type Users struct {
 	RoleDisabled []bool
 	Store        UserStore
 	TM           *etx.TM
+
+	rolesEnabled []string
+	toApp        map[int] int
+	toForm       map[int] int
 }
 
 // WebFiles are the package's web resources (templates and static files)
 //
 //go:embed web
 var WebFiles embed.FS
+
+// init is a horrible hack :-(.
+//
+// This is a workaround because the webparts.users interface expects a contiguous set of role numbers, starting at 0.
+// However the application may have defined roles that are not used, notably "undefined".
+// We can't use disabled option tags in the form because disabled option values are not returned, and that breaks
+// webparts.multiforms. So we convert between the role codes enabled by the application and the role option numbers
+// used in the form.
+//
+// ## With more thought I need a revised interface to specify role codes and names.
+func (u *Users) init() {
+
+	if u.toApp != nil {
+		return // initialised
+	}
+	// mapping between application roles and form roles
+	l := len(u.Roles)
+	u.rolesEnabled = make([]string, 0, l)
+	u.toApp = make(map[int]int, l)
+	u.toForm = make(map[int]int, l)
+
+	iForm := 0
+	for iApp, d := range u.RoleDisabled {
+		if !d && iApp < len(u.Roles){
+			// role enabled (otherwise value disabled and cannot appear in form)
+			u.rolesEnabled = append(u.rolesEnabled, u.Roles[iApp])
+			u.toApp[iForm] = iApp
+			u.toForm[iApp] = iForm
+			iForm++
+		}
+	}
+
+	// remaining roles are enabled
+	iApp := len(u.RoleDisabled)
+	for _, r := range u.Roles[iApp:len(u.Roles)] {
+		u.rolesEnabled = append(u.rolesEnabled, r)
+		u.toApp[iForm] = iApp
+		u.toForm[iApp] = iForm
+		iApp++
+		iForm++
+	}
+}

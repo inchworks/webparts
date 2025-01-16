@@ -39,7 +39,7 @@
 									<select class='form-select {{.ChildValid "role"}}' name='role'>
 										{{ $role := .Role }}
 										{{ range $i, $opt := $roleOpts }}
-											<option value='{{ $i }}' {{ $opt.Attrs }} {{ if eq $i $role }} selected{{ end }}>{{ $opt.Text }}</option>
+											<option value='{{ $i }}' {{ if eq $i $role }} selected{{ end }}>{{ $opt }}</option>
 										{{end}}
 									</select>
 									<div class='invalid-feedback'>{{.ChildError "role"}}</div>

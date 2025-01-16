@@ -8,39 +8,52 @@ import (
 	"path/filepath"
 )
 
-// NewTemplates returns a cache of HTML page templates for an application, with added package and site templates.
+// NewTemplatesLayered returns a cache of HTML page templates for an application,
+// with added package and layer templates. Typically the layers are the application,
+// app customisations, and site customisations.
 //
 // The cache is built using the file organisation suggested by Let's Go by Alex Edwards:
-// a page.tmpl file specifies the name and content of am HTML page in the cache;
+// a page.tmpl file specifies the name and content of an HTML page in the cache;
 // a layout.tmpl file defines a common layout for a set of pages;
 // partial.tmpl files define common content across multiple pages and layouts.
 //
-// Application template definitions override package templates of the same name.
-// Similarly, site template definitions override application templates by name.
-func NewTemplates(forPkgs []fs.FS, forApp fs.FS, forSite fs.FS, funcs template.FuncMap) (map[string]*template.Template, error) {
+// Layer template definitions override package templates of the same name.
+// Similarly, each layer's template definitions override preceding layer templates by name.
+func NewTemplatesLayered(funcs template.FuncMap, forPkgs []fs.FS, forLayers ...fs.FS) (map[string]*template.Template, error) {
 
 	// cache of templates indexed by page name
 	cache := map[string]*template.Template{}
 
-	// add library page templates
+	// packages cannot customise app layers
+	// ## They shouldn't be able to customise each other, either. How to prevent it?
 	for _, forPkg := range forPkgs {
-		if err := addTemplates(cache, forPkg, funcs, forPkg, forApp, forSite); err != nil {
+
+		// combined package and app customisations
+		all := make([]fs.FS, 1, len(forLayers)+1)
+		all[0] = forPkg
+		all = append(all, forLayers...)
+
+		// add package's page templates
+		if err := addTemplates(cache, forPkg, funcs, all...); err != nil {
 			return nil, err
 		}
 	}
 
-	// add application page templates
-	if err := addTemplates(cache, forApp, funcs, forApp, forSite); err != nil {
-		return nil, err
-	}
-
-	// add site-specific page templates
-	if err := addTemplates(cache, forSite, funcs, forApp, forSite); err != nil {
-		return nil, err
+	for _, forLayer := range forLayers {
+		// add layer's page templates
+		if err := addTemplates(cache, forLayer, funcs, forLayers...); err != nil {
+			return nil, err
+		}
 	}
 
 	// return the map
 	return cache, nil
+}
+
+// NewTemplates is deprecated as too specific. Use NewTemplatesLayered instead.
+func NewTemplates(forPkgs []fs.FS, forApp fs.FS, forSite fs.FS, funcs template.FuncMap) (map[string]*template.Template, error) {
+
+	return NewTemplatesLayered(funcs, forPkgs, forApp, forSite)
 }
 
 // addTemplates parses a set of template files for HTML pages.

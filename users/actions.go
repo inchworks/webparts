@@ -24,25 +24,34 @@ func (u *Users) UserDisplayName(userId int64) string {
 }
 
 // forEditUsers returns data to edit users in a form.
-func (u *Users) forEditUsers(token string) *UsersForm {
+func (ua *Users) forEditUsers(token string) (*UsersForm, error) {
 
 	// serialisation
-	defer u.App.Serialise(false)()
+	defer ua.App.Serialise(false)()
+
+	ua.init() // ## hack
 
 	// users
-	users := u.Store.ByName()
+	users := ua.Store.ByName()
 
 	// form
 	var d = make(url.Values)
-	f := u.NewUsersForm(d, token)
+	f := ua.NewUsersForm(d, token)
 
 	// add template and users to form
-	f.AddTemplate()
+	f.AddTemplate(ua.toForm[0]) // first enabled role
 	for i, u := range users {
-		f.Add(i, u)
+
+		// convert role code to form value
+		r, ok := ua.toForm[u.Role]
+		if !ok  {
+			return nil, errors.New("Invalid user role code")
+		}
+
+		f.Add(i, u, r)
 	}
 
-	return f
+	return f, nil
 }
 
 // onEditUsers processes returned form data. Returns an extended transaction ID if there are no errors (client or server).
@@ -79,7 +88,7 @@ func (ua *Users) onEditUsers(usSrc []*UserFormData) etx.TxId {
 			u := User{
 				Name:     usSrc[iSrc].DisplayName,
 				Username: usSrc[iSrc].Username,
-				Role:     usSrc[iSrc].Role,
+				Role:     ua.toApp[usSrc[iSrc].Role],
 				Status:   usSrc[iSrc].Status,
 				Password: []byte(""),
 			}
@@ -98,16 +107,17 @@ func (ua *Users) onEditUsers(usSrc []*UserFormData) etx.TxId {
 			} else if ix == iDest {
 				// check if user's details changed
 				uSrc := usSrc[iSrc]
+				uSrcRole := ua.toApp[uSrc.Role]
 				uDest := usDest[iDest]
 				if uSrc.DisplayName != uDest.Name ||
 					uSrc.Username != uDest.Username ||
-					uSrc.Role != uDest.Role ||
+					uSrcRole != uDest.Role ||
 					uSrc.Status != uDest.Status {
 
 					was := *uDest
 					uDest.Name = uSrc.DisplayName
 					uDest.Username = uSrc.Username
-					uDest.Role = uSrc.Role
+					uDest.Role = uSrcRole
 					uDest.Status = uSrc.Status
 					if err := ua.Store.Update(uDest); err != nil {
 						return 0 // unexpected database error

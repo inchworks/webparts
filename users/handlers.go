@@ -109,7 +109,12 @@ func (u *Users) GetFormEdit(w http.ResponseWriter, r *http.Request) {
 	app := u.App
 
 	// form to edit users, and
-	f := u.forEditUsers(app.Token(r))
+	f, err := u.forEditUsers(app.Token(r))
+	if err != nil {
+		app.Log(err)
+		u.clientError(w, http.StatusInternalServerError)
+		return
+	}
 
 	// display form
 	app.Render(w, r, "edit-users.page.tmpl", f)
