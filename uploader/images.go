@@ -19,6 +19,7 @@ import (
 	_ "golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 // decodeImage reads and decodes an image, with any EXIF orientation applied.

@@ -346,7 +346,7 @@ func (up *Uploader) Save(fh *multipart.FileHeader, tx etx.TxId, version int) (er
 	// check file, as much as we can easily
 	// ## could do more?
 	if up.MediaType(name) == 0 {
-		return errors.New("uploader: File format not supported"), true
+		return errors.New("uploader: File format not supported " + name), true
 	}
 
 	// save temporary file
@@ -736,6 +736,7 @@ func initialiseFormats(audioTypes []string, videoTypes []string) (formats map[st
 	formats[".png"] = mediaFormat{mediaType: MediaImage, convert: false, toType:".png"}
 	formats[".tif"] = mediaFormat{mediaType: MediaImage, convert: true, toType:".jpg"}
 	formats[".tiff"] = mediaFormat{mediaType: MediaImage, convert: true, toType:".jpg"}
+	formats[".webp"] = mediaFormat{mediaType: MediaImage, convert: true, toType:".png"}
 
 	// acceptable audio formats, all converted to M4A
 	for _, t := range audioTypes {
