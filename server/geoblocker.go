@@ -53,7 +53,7 @@ func (gb *GeoBlocker) Start(countries []string) {
 	// blocked countries
 	gb.listed = make(map[string]bool)
 	for _, c := range countries {
-		gb.listed[strings.ToUpper(c)] = true
+		gb.listed[strings.ToUpper(strings.TrimSpace(c))] = true
 	}
 
 	// reload geo database regularly

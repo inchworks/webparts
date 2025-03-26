@@ -1,8 +1,8 @@
 module github.com/inchworks/webparts/v2
 
-go 1.21
+go 1.24
 
-toolchain go1.22.0
+toolchain go1.24.0
 
 require (
 	github.com/oschwald/maxminddb-golang v1.13.1
@@ -10,9 +10,11 @@ require (
 	golang.org/x/time v0.8.0
 )
 
+require github.com/stretchr/testify v1.10.0 // indirect
+
 require (
 	golang.org/x/image v0.23.0
 	golang.org/x/net v0.33.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
 )

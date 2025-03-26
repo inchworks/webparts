@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/acme/autocert"
@@ -45,6 +46,11 @@ func (srv *Server) Serve(app App) {
 
 	// live server if we have a domain specified
 	if len(srv.Domains) > 0 {
+
+		// trim any leading spaces from environment string
+		for i, d := range srv.Domains {
+			srv.Domains[i] = strings.TrimSpace(d)
+		}
 
 		// certificate manager
 		m := &autocert.Manager{

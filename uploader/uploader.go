@@ -249,6 +249,8 @@ func (up *Uploader) Initialise(log *log.Logger, db DB, tm *etx.TM) {
 	}
 
 	// acceptable media types
+	trimSpaces(up.AudioTypes)
+	trimSpaces(up.VideoTypes)
 	up.mediaFormats = initialiseFormats(up.AudioTypes, up.VideoTypes)
 
 	up.errorLog = log
@@ -864,6 +866,13 @@ func (up *Uploader) saveMedia(req reqSave) error {
 func stem(fn string) string {
 	return strings.TrimSuffix(fn, filepath.Ext(fn))
 }
+
+// trimSpaces removes any leading spaces from a list derived from an environment string
+func trimSpaces(ss []string) {
+	for i, s := range ss {
+			ss[i] = strings.TrimSpace(s)
+		}
+	}
 
 // worker does background processing for media.
 func (up *Uploader) worker(
