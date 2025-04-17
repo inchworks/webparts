@@ -22,6 +22,9 @@ Please open issues to discuss new features.
 
 ## Acknowledgments
 
+The server package optionally uses GeoLite2 Data created by MaxMind, available from
+[www.maxmind.com](https://www.maxmind.com).
+
 Go Packages
 - [oschwald/maxminddb-golang](https://github.com/oschwald/maxminddb-golang) Geoblocking database reader.
 
