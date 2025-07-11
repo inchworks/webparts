@@ -125,7 +125,7 @@ func (up *Uploader) saveSnapshot(videoName string) error {
 	return err
 }
 
-// saveVideo saves the video file and a thumbnail. It returns true if format conversion is needed.
+// saveAV saves the audio or video file and a thumbnail. It returns true if format conversion is needed.
 func (up *Uploader) saveAV(req reqSave) (bool, error) {
 
 	var err error

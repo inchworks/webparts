@@ -178,7 +178,7 @@ func (up *Uploader) saveImage(req reqSave) error {
 		runtime.Gosched()
 
 		// save and delete original
-		if err := saveImageAs(req.format.toType, img, toPath, up.ImageQuality); err != nil {
+		if err := saveImageAs(img, toPath, up.ImageQuality); err != nil {
 			return err // ## could be a bad name?
 		}
 		if err := os.Remove(fromPath); err != nil {
@@ -195,13 +195,13 @@ func (up *Uploader) saveImage(req reqSave) error {
 }
 
 // saveImage saves the image to a file with the specified format.
-func saveImageAs(format string, img image.Image, name string, quality int) error {
+func saveImageAs(img image.Image, name string, quality int) error {
 	file, err := os.Create(name)
 	if err != nil {
 		return err
 	}
 
-	switch format {
+	switch filepath.Ext(name) {
 	case ".jpg": 
 		err = jpeg.Encode(file, img, &jpeg.Options{Quality: quality})
 	
@@ -220,5 +220,5 @@ func (up *Uploader) saveThumbnail(img image.Image, o orientation, name string) e
 	thumbnail := fit(img, image.Point{X: up.ThumbW, Y: up.ThumbH})
 	thumbnail = FixOrientation(thumbnail, o)
 
-	return saveImageAs(".jpg", thumbnail, name, up.ImageQuality)
+	return saveImageAs(thumbnail, name, up.ImageQuality)
 }

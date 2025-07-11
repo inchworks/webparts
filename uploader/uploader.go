@@ -71,9 +71,10 @@ import (
 )
 
 const (
-	MediaImage = 1
-	MediaVideo = 2
-	MediaAudio = 3
+	MediaImage    = 1
+	MediaVideo    = 2
+	MediaAudio    = 3
+	MediaDocument = 4
 )
 
 // Uploader holds the parameters and state for uploading files. Typically only one is needed.
@@ -91,13 +92,14 @@ type Uploader struct {
 	DeleteAfter     time.Duration // delay before deleting a file
 	SnapshotAt      time.Duration // snapshot time in video (-ve for none)
 	AudioTypes      []string
+	DocumentTypes   []string
 	ImageQuality    int    // JPEG quality, 1-100
 	VideoPackage    string // software for video processing: ffmpeg, or a docker-hosted implementation of ffmpeg, for debugging
 	VideoResolution int
 	VideoTypes      []string
 
 	// media accepted and converted
-	mediaFormats    map[string]mediaFormat
+	mediaFormats map[string]mediaFormat
 
 	// components
 	errorLog *log.Logger
@@ -143,8 +145,8 @@ type Bind struct {
 
 type reqSave struct {
 	format mediaFormat
-	name      string // file name
-	claim     *Claim
+	name   string // file name
+	claim  *Claim
 }
 
 type reqClaimed struct {
@@ -250,8 +252,9 @@ func (up *Uploader) Initialise(log *log.Logger, db DB, tm *etx.TM) {
 
 	// acceptable media types
 	trimSpaces(up.AudioTypes)
+	trimSpaces(up.DocumentTypes)
 	trimSpaces(up.VideoTypes)
-	up.mediaFormats = initialiseFormats(up.AudioTypes, up.VideoTypes)
+	up.mediaFormats = initialiseFormats(up.AudioTypes, up.DocumentTypes, up.VideoTypes)
 
 	up.errorLog = log
 	up.db = db
@@ -637,13 +640,18 @@ func Thumbnail(filename string) string {
 	case ".jpg", ".png":
 		return "S" + filename[1:]
 
+	case ".mp4":
+		// videos have JPG thumbnail
+		tn := changeExt(filename, ".jpg")
+		return "S" + tn[1:]
+
 	// ## extensions not normalised for current websites :-(
 	case ".jpeg", ".JPG", ".PNG", ".JPEG":
 		return "S" + filename[1:]
 
 	default:
-		// replace file extension
-		tn := changeExt(filename, ".jpg")
+		// audio and documents have PNG thumbnail
+		tn := changeExt(filename, ".png")
 		return "S" + tn[1:]
 	}
 }
@@ -726,32 +734,37 @@ func (up *Uploader) getFormat(name string) mediaFormat {
 }
 
 // initialiseFormats returns the mediaFormat specifications for all supported media types.
-func initialiseFormats(audioTypes []string, videoTypes []string) (formats map[string]mediaFormat) {
+func initialiseFormats(audioTypes []string, docTypes []string, videoTypes []string) (formats map[string]mediaFormat) {
 
 	formats = make(map[string]mediaFormat, 20)
 
 	// acceptable image types
-	formats[".bmp"] = mediaFormat{mediaType: MediaImage, convert: true, toType:".png"}
-	formats[".gif"] = mediaFormat{mediaType: MediaImage, convert: true, toType:".png"}
-	formats[".jpg"] = mediaFormat{mediaType: MediaImage, convert: false, toType:".jpg"}
-	formats[".jpeg"] = mediaFormat{mediaType: MediaImage, convert: false, toType:".jpg"}
-	formats[".png"] = mediaFormat{mediaType: MediaImage, convert: false, toType:".png"}
-	formats[".tif"] = mediaFormat{mediaType: MediaImage, convert: true, toType:".jpg"}
-	formats[".tiff"] = mediaFormat{mediaType: MediaImage, convert: true, toType:".jpg"}
-	formats[".webp"] = mediaFormat{mediaType: MediaImage, convert: true, toType:".png"}
+	formats[".bmp"] = mediaFormat{mediaType: MediaImage, convert: true, toType: ".png"}
+	formats[".gif"] = mediaFormat{mediaType: MediaImage, convert: true, toType: ".png"}
+	formats[".jpg"] = mediaFormat{mediaType: MediaImage, convert: false, toType: ".jpg"}
+	formats[".jpeg"] = mediaFormat{mediaType: MediaImage, convert: false, toType: ".jpg"}
+	formats[".png"] = mediaFormat{mediaType: MediaImage, convert: false, toType: ".png"}
+	formats[".tif"] = mediaFormat{mediaType: MediaImage, convert: true, toType: ".jpg"}
+	formats[".tiff"] = mediaFormat{mediaType: MediaImage, convert: true, toType: ".jpg"}
+	formats[".webp"] = mediaFormat{mediaType: MediaImage, convert: true, toType: ".png"}
 
 	// acceptable audio formats, all converted to M4A
 	for _, t := range audioTypes {
 		cvt := t != ".m4a"
-		formats[t] = mediaFormat{mediaType: MediaAudio, convert: cvt, toType:".m4a"}
+		formats[t] = mediaFormat{mediaType: MediaAudio, convert: cvt, toType: ".m4a"}
+	}
+
+	// acceptable document formats, not converted
+	for _, t := range docTypes {
+		formats[t] = mediaFormat{mediaType: MediaDocument, toType: t}
 	}
 
 	// acceptable video formats, all converted to MP4
 	for _, t := range videoTypes {
 		cvt := t != ".mp4"
-		formats[t] = mediaFormat{mediaType: MediaVideo, convert: cvt, toType:".mp4"}
+		formats[t] = mediaFormat{mediaType: MediaVideo, convert: cvt, toType: ".mp4"}
 	}
-	
+
 	return
 }
 
@@ -854,6 +867,10 @@ func (up *Uploader) saveMedia(req reqSave) error {
 		}
 		// otherwise, processing continued in AV worker
 
+	case MediaDocument:
+		err = up.saveDocument(req)
+		up.opDone(req.claim)
+
 	case MediaImage:
 		err = up.saveImage(req)
 		up.opDone(req.claim)
@@ -870,9 +887,9 @@ func stem(fn string) string {
 // trimSpaces removes any leading spaces from a list derived from an environment string
 func trimSpaces(ss []string) {
 	for i, s := range ss {
-			ss[i] = strings.TrimSpace(s)
-		}
+		ss[i] = strings.TrimSpace(s)
 	}
+}
 
 // worker does background processing for media.
 func (up *Uploader) worker(
