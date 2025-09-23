@@ -2,7 +2,7 @@
 
 ## Features
 
-This is an assorted set of Go packages shared between a couple of Inchworks web applications.
+A set of Go packages that support building a web application.
 
 - limiterhandler : rate limiting of HTTP requests to mitigate password guessing and other probes.
 - monitor : maintains and reports the liveness of a set of clients that are polling a server.
@@ -12,21 +12,6 @@ This is an assorted set of Go packages shared between a couple of Inchworks web 
 - uploader : management of uploaded images and videos.
 - users : user signup, log-in and management for a pre-approved set of application users.
 
-For examples of use, see https://github.com/inchworks/picinch.
+[![Project Status: Moved to https://codeberg.org/inchworks – The project has been moved to a new location, and the version at that location should be considered authoritative.](https://www.repostatus.org/badges/latest/moved.svg)](https://www.repostatus.org/#moved) to [https://codeberg.org/inchworks](https://codeberg.org/inchworks)
 
-## Contributing
-
-This is work in progress, and likely to change.
-So I can only accept pull requests for minor fixes or improvements to existing facilities.
-Please open issues to discuss new features.
-
-## Acknowledgments
-
-The server package optionally uses GeoLite2 Data created by MaxMind, available from
-[www.maxmind.com](https://www.maxmind.com).
-
-Go Packages
-- [oschwald/maxminddb-golang](https://github.com/oschwald/maxminddb-golang) Geoblocking database reader.
-
-Other
-- [Speaker_Icon.svg](https://commons.wikimedia.org/wiki/File:Speaker_Icon.svg) Icon for audio files.
+This version will remain here for code that references it. Together, codeberg.org/inchworks/webparts and codeberg.org/inchworks/webstarter replace github.com/inchworks/v2/webparts and github.com/inchworks/usage.
