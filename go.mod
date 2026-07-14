@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/oschwald/maxminddb-golang v1.13.1
-	golang.org/x/crypto v0.51.0
+	golang.org/x/crypto v0.52.0
 	golang.org/x/time v0.11.0
 )
 
